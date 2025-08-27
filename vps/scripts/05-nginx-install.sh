@@ -20,12 +20,12 @@ main() {
 
     install_nginx
     configure_nginx_security      # nginx.conf (no ssl_* here)
-    setup_ssl_config              # central ssl knobs (once)
-    setup_proxy_snippet           # central proxy knobs (once)
+    setup_ssl_config              # central SSL knobs (http{} scope)
+    setup_proxy_snippet           # central proxy knobs (include inside location)
     install_certbot
     configure_nginx_logrotate
 
-    # (Optional) De-duplicate any already-generated vhosts
+    # De-duplicate any existing vhosts and ensure proper symlinks
     dedupe_all_vhosts "/etc/nginx/sites-available"
 
     enable_nginx_service
@@ -195,7 +195,9 @@ EOF
     ensure_directory "/etc/nginx/sites-available" "755"
     ensure_directory "/etc/nginx/sites-enabled" "755"
 
+    # Remove Debian's default site completely so it can't clash with the catch-all
     rm -f /etc/nginx/sites-enabled/default
+    rm -f /etc/nginx/sites-available/default
     rm -f /var/www/html/index.*
 
     log_success "Nginx security configuration completed"
@@ -233,7 +235,7 @@ setup_proxy_snippet() {
     log "Creating shared proxy snippet (global)..."
 
     cat > /etc/nginx/conf.d/proxy.conf << 'EOF'
-# VPS Proxy Hub - Proxy Configuration (to include inside location{} that proxy_pass)
+# VPS Proxy Hub - Proxy Configuration (include inside location{} with proxy_pass)
 
 # Proxy headers
 proxy_set_header Host $host;
@@ -376,13 +378,12 @@ dedupe_vhost() {
 ' "$file"
 
     # Ensure shared proxy snippet is included before first proxy_pass in each location block
-    # (insert include only if not already present in that location)
     awk '
-    BEGIN {in_loc=0}
-    /^\s*location[^{]*\{/ {in_loc=1; printed=0}
-    in_loc && /proxy_pass/ && !printed {
+    BEGIN {in_loc=0; inserted=0}
+    /^\s*location[^{]*\{/ {in_loc=1; inserted=0}
+    in_loc && /proxy_pass/ && !inserted {
         print "        include /etc/nginx/conf.d/proxy.conf;";
-        printed=1
+        inserted=1
     }
     /\}/ {in_loc=0}
     {print}
@@ -398,36 +399,37 @@ dedupe_all_vhosts() {
     shopt -s nullglob
     for f in "$dir"/*; do
         [[ -f "$f" ]] || continue
+
+        # Skip Debian's default site to avoid re-linking it
+        [[ "$(basename "$f")" == "default" ]] && continue
+
         log "De-duplicating vhost: $f"
         dedupe_vhost "$f"
 
-        # Keep sites-enabled in sync (Debian-style symlink)
-        local name dst src real_dst real_src
+        # Keep sites-enabled as a symlink to sites-available (Debian-style)
+        local name src dst real_src real_dst
         name="$(basename "$f")"
         src="$f"
         dst="$enabled/$name"
 
-        # Resolve real paths for comparison
         real_src="$(readlink -f "$src")"
         real_dst="$(readlink -f "$dst" 2>/dev/null || true)"
 
-        # If dst doesn't exist, create symlink
         if [[ ! -e "$dst" ]]; then
             ln -s "$src" "$dst"
             continue
         fi
 
-        # If dst already points to the same real file, do nothing
+        # If already pointing to same file, do nothing
         if [[ "$real_dst" == "$real_src" ]]; then
             continue
         fi
 
-        # If dst exists but points elsewhere (file or wrong symlink), replace with symlink
+        # Replace whatever is there with a symlink
         rm -f "$dst"
         ln -s "$src" "$dst"
     done
 }
-
 
 enable_nginx_service() {
     log "Enabling and starting Nginx service..."
