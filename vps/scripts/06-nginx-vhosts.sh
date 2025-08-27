@@ -334,6 +334,7 @@ obtain_site_ssl() {
 
     log "Obtaining SSL certificate for site: $site_name"
 
+    # Server names
     local server_names
     if command -v yq &> /dev/null; then
         server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
@@ -345,27 +346,40 @@ obtain_site_ssl() {
         log_error "No server names found for site $site_name"; return 1
     fi
 
+    # Domain args
     local domain_args=""; for d in $server_names; do domain_args+=" -d $d"; done
     log "Requesting certificate for domains: $server_names"
 
-    # --nginx will add: listen 443 ssl, ssl_certificate(_key), and --redirect
-    if certbot --nginx \
-        --email "$email" \
-        --agree-tos \
-        --no-eff-email \
-        --redirect \
-        $staging_flag \
-        $dry_run_flag \
-        $domain_args; then
-        if [[ -z "$dry_run_flag" ]]; then
-            log_success "SSL certificate obtained for $site_name"
-        else
+    if [[ -n "$dry_run_flag" ]]; then
+        # Dry run must use certonly or renew. Use certonly with the nginx installer.
+        if certbot certonly --nginx \
+            --email "$email" \
+            --agree-tos \
+            --no-eff-email \
+            $staging_flag \
+            --dry-run \
+            $domain_args; then
             log_success "SSL certificate dry run completed for $site_name"
+        else
+            log_error "Failed certbot dry run for $site_name"
+            log "Check DNS points to this server and port 80 is reachable"
+            return 1
         fi
     else
-        log_error "Failed to obtain SSL certificate for $site_name"
-        log "Check that DNS points to this server and port 80 is reachable"
-        return 1
+        # Real issuance: install + configure nginx and force HTTPS redirects
+        if certbot --nginx \
+            --email "$email" \
+            --agree-tos \
+            --no-eff-email \
+            --redirect \
+            $staging_flag \
+            $domain_args; then
+            log_success "SSL certificate obtained for $site_name"
+        else
+            log_error "Failed to obtain SSL certificate for $site_name"
+            log "Check that DNS points to this server and port 80 is reachable"
+            return 1
+        fi
     fi
 }
 
