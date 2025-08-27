@@ -17,10 +17,10 @@ main() {
     # Install Nginx
     install_nginx
     
-    # Configure Nginx security settings
+    # Configure Nginx security settings (no SSL directives here)
     configure_nginx_security
     
-    # Setup SSL/TLS configuration
+    # Setup SSL/TLS configuration (centralized here)
     setup_ssl_config
     
     # Install Certbot for Let's Encrypt
@@ -78,7 +78,7 @@ configure_nginx_security() {
     # Backup original nginx.conf
     backup_file "/etc/nginx/nginx.conf"
     
-    # Create enhanced nginx.conf
+    # Create enhanced nginx.conf (NO ssl_* directives here)
     cat > /etc/nginx/nginx.conf << 'EOF'
 # VPS Proxy Hub - Nginx Configuration
 # Optimized for reverse proxy with security and performance
@@ -133,17 +133,6 @@ http {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    
-    ##
-    # SSL Configuration
-    ##
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-    ssl_stapling on;
-    ssl_stapling_verify on;
 
     ##
     # Logging Settings
@@ -171,6 +160,7 @@ http {
         text/javascript
         application/json
         application/javascript
+        application/xml
         application/xml+rss
         application/atom+xml
         image/svg+xml;
@@ -231,7 +221,7 @@ EOF
 setup_ssl_config() {
     log "Setting up SSL/TLS configuration..."
     
-    # Create SSL configuration snippet
+    # Create SSL configuration snippet (the only place with ssl_* in http context)
     cat > /etc/nginx/conf.d/ssl.conf << 'EOF'
 # VPS Proxy Hub - SSL/TLS Configuration
 # Modern SSL configuration for security
@@ -244,7 +234,6 @@ ssl_session_tickets off;
 # SSL protocols and ciphers
 ssl_protocols TLSv1.2 TLSv1.3;
 ssl_prefer_server_ciphers off;
-
 ssl_ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
 
 # HSTS (optional - will be enabled per site)
@@ -300,29 +289,27 @@ install_certbot() {
     
     if command -v certbot &> /dev/null; then
         log "Certbot is already installed"
-        return 0
-    fi
-    
-    if command -v apt-get &> /dev/null; then
-        # Ubuntu/Debian
-        apt-get install -y certbot python3-certbot-nginx
-        
-    elif command -v yum &> /dev/null; then
-        # CentOS/RHEL 7
-        yum install -y epel-release
-        yum install -y certbot python2-certbot-nginx
-        
-    elif command -v dnf &> /dev/null; then
-        # Fedora/CentOS 8+
-        dnf install -y certbot python3-certbot-nginx
-        
     else
-        log_warning "Could not install certbot automatically"
-        return 1
+        if command -v apt-get &> /dev/null; then
+            # Ubuntu/Debian
+            apt-get install -y certbot python3-certbot-nginx
+        elif command -v yum &> \dev\null; then
+            # CentOS/RHEL 7
+            yum install -y epel-release
+            yum install -y certbot python2-certbot-nginx
+        elif command -v dnf &> /dev/null; then
+            # Fedora/CentOS 8+
+            dnf install -y certbot python3-certbot-nginx
+        else
+            log_warning "Could not install certbot automatically"
+        fi
     fi
-    
-    # Set up automatic renewal
-    if [[ -f /etc/crontab ]]; then
+
+    # Prefer systemd timer when present; otherwise, add cron
+    if systemctl list-unit-files | grep -q '^certbot.timer'; then
+        systemctl enable --now certbot.timer || true
+        log "Using systemd certbot.timer for renewals"
+    elif [[ -f /etc/crontab ]]; then
         if ! grep -q "certbot renew" /etc/crontab; then
             echo "0 12 * * * root certbot renew --quiet" >> /etc/crontab
             log "Added certbot renewal to crontab"
@@ -363,7 +350,7 @@ configure_nginx_logrotate() {
         fi
     endscript
     postrotate
-        invoke-rc.d nginx rotate >/dev/null 2>&1 || true
+        invoke-rc.d nginx rotate >/dev/null ^&1 || true
     endscript
 }
 EOF
@@ -398,6 +385,9 @@ enable_nginx_service() {
     
     # Wait for service to be ready
     wait_for_service "nginx"
+    
+    # Re-test after start just to be explicit
+    nginx -t || { log_error "Nginx configuration test failed after start"; exit 1; }
     
     # Test if nginx is responding
     if curl -s -o /dev/null -w "%{http_code}" http://localhost | grep -q "444"; then
