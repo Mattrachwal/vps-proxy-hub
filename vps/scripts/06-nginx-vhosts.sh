@@ -17,84 +17,25 @@ main() {
     # Ensure ACME webroot exists
     ensure_directory "/var/www/html" "755"
 
-    # Process each site in the configuration (HTTP-only)
+    # Process each site in the configuration (HTTP-only first)
     process_sites
 
-    # Test nginx configuration (should pass without SSL certs)
+    # Test nginx configuration (should pass without certs)
     test_nginx_config
 
     # Reload nginx to apply HTTP sites
     reload_nginx
 
-    # Obtain SSL certificates (this will add TLS listeners + redirect)
+    # Obtain SSL certificates and enable HTTPS+redirect
     obtain_ssl_certificates
 
     log_success "Nginx virtual hosts configuration completed"
 }
 
-process_sites() {
-    log "Processing sites from configuration..."
-
-    # Clear existing vhosts for this app
-    log "Removing existing virtual host configurations..."
-    rm -f /etc/nginx/sites-enabled/vps-proxy-hub-*
-    rm -f /etc/nginx/sites-available/vps-proxy-hub-*
-
-    # Process each site
-    if command -v yq &> /dev/null; then
-        yq eval '.sites[] | .name' "$CONFIG_FILE" | while IFS= read -r site_name; do
-            [[ -n "$site_name" ]] && process_site "$site_name"
-        done
-    else
-        # Basic parsing for site names
-        grep -A 50 "^sites:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r site_name; do
-            [[ -n "$site_name" ]] && process_site "$site_name"
-        done
-    fi
-}
-
-process_site() {
-    local site_name="$1"
-    log "Processing site: $site_name"
-
-    # Extract site configuration
-    local server_names peer upstream_config nginx_config
-    if command -v yq &> /dev/null; then
-        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
-        peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE")
-        upstream_config=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream" "$CONFIG_FILE" || true)
-        nginx_config=$(yq eval ".sites[] | select(.name == \"$site_name\") | .nginx" "$CONFIG_FILE" || true)
-    else
-        server_names=$(extract_site_config "$site_name" "server_names")
-        peer=$(extract_site_config "$site_name" "peer")
-    fi
-
-    if [[ -z "$peer" ]]; then
-        log_error "No peer specified for site $site_name"
-        return 1
-    fi
-
-    # Get peer IP address
-    local peer_ip
-    peer_ip=$(get_peer_ip "$peer")
-    if [[ -z "$peer_ip" ]]; then
-        log_error "Could not determine IP for peer $peer"
-        return 1
-    fi
-
-    # Determine upstream URL
-    local upstream_url
-    upstream_url=$(determine_upstream_url "$site_name" "$peer_ip") || return 1
-
-    # Generate HTTP-only virtual host configuration
-    generate_vhost_http_only "$site_name" "$server_names" "$upstream_url"
-
-    log_success "Generated virtual host for $site_name"
-}
+# --- Helpers ---------------------------------------------------------------
 
 extract_site_config() {
-    local site_name="$1"
-    local key="$2"
+    local site_name="$1" key="$2"
     awk "
     /name:.*\"?${site_name}\"?/ { in_site = 1; next }
     in_site && /^[[:space:]]*-[[:space:]]*name:/ && !/name:.*\"?${site_name}\"?/ { in_site = 0 }
@@ -124,11 +65,21 @@ get_peer_ip() {
     fi
 }
 
-determine_upstream_url() {
-    local site_name="$1"
-    local peer_ip="$2"
+extract_upstream_config() {
+    local site_name="$1" key="$2"
+    awk "
+    /name:.*\"?${site_name}\"?/ { in_site = 1; next }
+    in_site && /upstream:/ { in_upstream = 1; next }
+    in_upstream && /^[[:space:]]*[a-zA-Z_]+:/ && !/${key}:/ { if (!/^[[:space:]]+/) in_upstream = 0; next }
+    in_upstream && /${key}:/ { gsub(/.*${key}:[[:space:]]*[\"']?/, \"\"); gsub(/[\"'].*/, \"\"); print \$0; exit }
+    in_site && /^[[:space:]]*-[[:space:]]*name:/ && !/name:.*\"?${site_name}\"?/ { in_site = 0; in_upstream = 0 }
+    " "$CONFIG_FILE"
+}
 
+determine_upstream_url() {
+    local site_name="$1" peer_ip="$2"
     local is_docker container_name container_port port
+
     if command -v yq &> /dev/null; then
         is_docker=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE")
         container_name=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_name" "$CONFIG_FILE")
@@ -156,22 +107,97 @@ determine_upstream_url() {
     fi
 }
 
-extract_upstream_config() {
+# Strip TLS, HSTS, HTTPS redirects, and duplicate proxy/security headers from a vhost file.
+sanitize_vhost_http_only() {
+  local file="$1"; [[ -f "$file" ]] || return 0
+
+  # Ensure HTTP-only (no TLS listeners or HSTS/redirects yet)
+  sed -i -E '/^\s*listen\s+.*443.*(ssl|http2)/d' "$file"
+  sed -i -E '/^\s*add_header\s+Strict-Transport-Security\b/d' "$file"
+  sed -i -E '/^\s*return\s+301\s+https:\/\//d' "$file"
+
+  # Drop per-site proxy knobs already defined globally in /etc/nginx/conf.d/proxy.conf
+  sed -i -E '
+    /^\s*proxy_(connect|send|read)_timeout\b/d;
+    /^\s*proxy_buffering\b/d;
+    /^\s*proxy_buffer_size\b/d;
+    /^\s*proxy_buffers\b/d;
+    /^\s*proxy_busy_buffers_size\b/d;
+    /^\s*proxy_http_version\b/d;
+    /^\s*proxy_set_header\s+(Host|X-Real-IP|X-Forwarded-For|X-Forwarded-Proto|X-Forwarded-Host|X-Forwarded-Port|Upgrade|Connection)\b/d;
+    /^\s*proxy_hide_header\s+(X-Frame-Options|X-Content-Type-Options|X-XSS-Protection)\b/d;
+  ' "$file"
+
+  # Drop global security headers (they live in nginx.conf)
+  sed -i -E '
+    /^\s*add_header\s+X-Frame-Options\b/d;
+    /^\s*add_header\s+X-Content-Type-Options\b/d;
+    /^\s*add_header\s+X-XSS-Protection\b/d;
+    /^\s*add_header\s+Referrer-Policy\b/d;
+  ' "$file"
+
+  # Drop gzip in server{}
+  sed -i -E '/^\s*gzip\b/d; /^\s*gzip_.*/d;' "$file"
+
+  # Drop global ssl_* (keep only cert lines if certbot later adds them)
+  sed -i -E '/^\s*ssl_(protocols|ciphers|prefer_server_ciphers|session_(cache|timeout|tickets)|stapling|stapling_verify)\b/d;' "$file"
+}
+
+# --- Site processing -------------------------------------------------------
+
+process_sites() {
+    log "Processing sites from configuration..."
+
+    # Tightened cleanup scope: remove only this app's vhosts
+    log "Removing existing virtual host configurations..."
+    rm -f /etc/nginx/sites-enabled/vps-proxy-hub-*
+    rm -f /etc/nginx/sites-available/vps-proxy-hub-*
+
+    if command -v yq &> /dev/null; then
+        yq eval '.sites[] | .name' "$CONFIG_FILE" | while IFS= read -r site_name; do
+            [[ -n "$site_name" ]] && process_site "$site_name"
+        done
+    else
+        # Basic parsing for site names
+        grep -A 50 "^sites:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r site_name; do
+            [[ -n "$site_name" ]] && process_site "$site_name"
+        done
+    fi
+}
+
+process_site() {
     local site_name="$1"
-    local key="$2"
-    awk "
-    /name:.*\"?${site_name}\"?/ { in_site = 1; next }
-    in_site && /upstream:/ { in_upstream = 1; next }
-    in_upstream && /^[[:space:]]*[a-zA-Z_]+:/ && !/${key}:/ { if (!/^[[:space:]]+/) in_upstream = 0; next }
-    in_upstream && /${key}:/ { gsub(/.*${key}:[[:space:]]*[\"']?/, \"\"); gsub(/[\"'].*/, \"\"); print \$0; exit }
-    in_site && /^[[:space:]]*-[[:space:]]*name:/ && !/name:.*\"?${site_name}\"?/ { in_site = 0; in_upstream = 0 }
-    " "$CONFIG_FILE"
+    log "Processing site: $site_name"
+
+    local server_names peer upstream_url
+
+    if command -v yq &> /dev/null; then
+        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
+        peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE")
+    else
+        server_names=$(extract_site_config "$site_name" "server_names")
+        peer=$(extract_site_config "$site_name" "peer")
+    fi
+
+    if [[ -z "$peer" ]]; then
+        log_error "No peer specified for site $site_name"; return 1
+    fi
+
+    local peer_ip
+    peer_ip=$(get_peer_ip "$peer")
+    if [[ -z "$peer_ip" ]]; then
+        log_error "Could not determine IP for peer $peer"; return 1
+    fi
+
+    upstream_url=$(determine_upstream_url "$site_name" "$peer_ip") || return 1
+
+    generate_vhost_http_only "$site_name" "$server_names" "$upstream_url"
+
+    log_success "Generated virtual host for $site_name"
 }
 
 generate_vhost_http_only() {
-    local site_name="$1"
-    local server_names="$2"
-    local upstream_url="$3"
+    local site_name="$1" server_names="$2" upstream_url="$3"
 
     local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}"
     local template_file="$SCRIPT_DIR/../templates/nginx-vhost.template"
@@ -180,7 +206,7 @@ generate_vhost_http_only() {
     server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
 
     if [[ -f "$template_file" ]]; then
-        # If you keep a template, it must be HTTP-only. Otherwise, we generate directly below.
+        # If you keep a template, it MUST be HTTP-only; sanitize just in case.
         substitute_template "$template_file" "$vhost_file" \
             "SITE_NAME=$site_name" \
             "SERVER_NAMES=$server_names" \
@@ -189,17 +215,17 @@ generate_vhost_http_only() {
         generate_vhost_http_only_direct "$vhost_file" "$site_name" "$server_names" "$upstream_url"
     fi
 
-    # Enable the site
+    # Sanitize: enforce HTTP-only and remove duplicate directives
+    sanitize_vhost_http_only "$vhost_file"
+
+    # Enable the site (symlink)
     ln -sf "$vhost_file" "/etc/nginx/sites-enabled/vps-proxy-hub-${site_name}"
 
     log "Created virtual host: $vhost_file"
 }
 
 generate_vhost_http_only_direct() {
-    local vhost_file="$1"
-    local site_name="$2"
-    local server_names="$3"
-    local upstream_url="$4"
+    local vhost_file="$1" site_name="$2" server_names="$3" upstream_url="$4"
 
     cat > "$vhost_file" << EOF
 # VPS Proxy Hub - Virtual Host for $site_name
@@ -240,6 +266,8 @@ server {
 EOF
 }
 
+# --- Actions ---------------------------------------------------------------
+
 test_nginx_config() {
     log "Testing Nginx configuration..."
     if nginx -t; then
@@ -262,87 +290,4 @@ reload_nginx() {
     fi
 }
 
-obtain_ssl_certificates() {
-    log "Obtaining SSL certificates with Let's Encrypt..."
-
-    local email staging_flag=""
-    email=$(get_config_value "tls.email")
-    local use_staging
-    use_staging=$(get_config_value "tls.use_staging" "false")
-
-    if [[ "$use_staging" == "true" ]]; then
-        staging_flag="--staging"
-        log_warning "Using Let's Encrypt staging environment (test certificates)"
-    fi
-
-    if [[ -z "$email" ]]; then
-        log_error "TLS email not configured in config.yaml"
-        log "SSL certificates will need to be obtained manually"
-        return 1
-    fi
-
-    local dry_run_flag=""
-    local dry_run_on_apply
-    dry_run_on_apply=$(get_config_value "ops.certbot_dry_run_on_apply" "false")
-    if [[ "$dry_run_on_apply" == "true" ]]; then
-        dry_run_flag="--dry-run"
-        log "Performing certbot dry run (test mode)"
-    fi
-
-    # Process each site for SSL
-    if command -v yq &> /dev/null; then
-        yq eval '.sites[] | .name' "$CONFIG_FILE" | while IFS= read -r site_name; do
-            [[ -n "$site_name" ]] && obtain_site_ssl "$site_name" "$email" "$staging_flag" "$dry_run_flag"
-        done
-    else
-        grep -A 50 "^sites:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r site_name; do
-            [[ -n "$site_name" ]] && obtain_site_ssl "$site_name" "$email" "$staging_flag" "$dry_run_flag"
-        done
-    fi
-}
-
-obtain_site_ssl() {
-    local site_name="$1" email="$2" staging_flag="$3" dry_run_flag="$4"
-
-    log "Obtaining SSL certificate for site: $site_name"
-
-    local server_names
-    if command -v yq &> /dev/null; then
-        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
-    else
-        server_names=$(extract_site_config "$site_name" "server_names")
-    fi
-    server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
-    if [[ -z "$server_names" ]]; then
-        log_error "No server names found for site $site_name"
-        return 1
-    fi
-
-    local domain_args=""
-    for domain in $server_names; do domain_args+=" -d $domain"; done
-
-    log "Requesting certificate for domains: $server_names"
-
-    # --nginx will add: listen 443 ssl, ssl_certificate(_key), and --redirect
-    if certbot --nginx \
-        --email "$email" \
-        --agree-tos \
-        --no-eff-email \
-        --redirect \
-        $staging_flag \
-        $dry_run_flag \
-        $domain_args; then
-        if [[ -z "$dry_run_flag" ]]; then
-            log_success "SSL certificate obtained for $site_name"
-        else
-            log_success "SSL certificate dry run completed for $site_name"
-        fi
-    else
-        log_error "Failed to obtain SSL certificate for $site_name"
-        log "Check that domains point to this server and port 80 is reachable from the Internet"
-        return 1
-    fi
-}
-
-# Run main function
-main "$@"
+ob
