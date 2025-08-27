@@ -391,21 +391,43 @@ dedupe_vhost() {
 
 dedupe_all_vhosts() {
     local dir="${1:-/etc/nginx/sites-available}"
+    local enabled="/etc/nginx/sites-enabled"
     [[ -d "$dir" ]] || return 0
+    ensure_directory "$enabled" "755"
+
     shopt -s nullglob
     for f in "$dir"/*; do
         [[ -f "$f" ]] || continue
         log "De-duplicating vhost: $f"
         dedupe_vhost "$f"
-    done
-    # Keep sites-enabled in sync (Debian-style)
-    for f in "$dir"/*; do
-        local name; name="$(basename "$f")"
-        if [[ -f "/etc/nginx/sites-enabled/$name" ]]; then
-            cp -f "$f" "/etc/nginx/sites-enabled/$name"
+
+        # Keep sites-enabled in sync (Debian-style symlink)
+        local name dst src real_dst real_src
+        name="$(basename "$f")"
+        src="$f"
+        dst="$enabled/$name"
+
+        # Resolve real paths for comparison
+        real_src="$(readlink -f "$src")"
+        real_dst="$(readlink -f "$dst" 2>/dev/null || true)"
+
+        # If dst doesn't exist, create symlink
+        if [[ ! -e "$dst" ]]; then
+            ln -s "$src" "$dst"
+            continue
         fi
+
+        # If dst already points to the same real file, do nothing
+        if [[ "$real_dst" == "$real_src" ]]; then
+            continue
+        fi
+
+        # If dst exists but points elsewhere (file or wrong symlink), replace with symlink
+        rm -f "$dst"
+        ln -s "$src" "$dst"
     done
 }
+
 
 enable_nginx_service() {
     log "Enabling and starting Nginx service..."
