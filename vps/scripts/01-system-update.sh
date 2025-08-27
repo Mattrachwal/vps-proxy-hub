@@ -103,16 +103,28 @@ net.ipv4.conf.default.accept_redirects = 0
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 
-# Connection tracking
-net.netfilter.nf_conntrack_max = 262144
-net.netfilter.nf_conntrack_tcp_timeout_established = 86400
-
 # File descriptor limits
 fs.file-max = 2097152
 EOF
+
+    # Apply basic sysctl settings (skip conntrack settings for now)
+    log "Applying initial sysctl settings..."
+    sysctl -p /etc/sysctl.d/99-vps-proxy-hub.conf || {
+        log_warning "Some sysctl settings couldn't be applied yet (will be set after reboot)"
+    }
     
-    # Apply sysctl settings
-    sysctl -p /etc/sysctl.d/99-vps-proxy-hub.conf
+    # Create a separate conntrack configuration that will be applied later
+    cat > /etc/sysctl.d/99-vps-proxy-hub-conntrack.conf << 'EOF'
+# VPS Proxy Hub - Connection tracking settings
+# These require netfilter modules to be loaded
+
+# Connection tracking (will be applied when modules are loaded)
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_tcp_timeout_established = 86400
+EOF
+    
+    # Load netfilter modules
+    load_netfilter_modules
     
     # Create swap file if requested
     if [[ "$create_swap" != "0" && "$create_swap" != "" ]]; then
@@ -133,6 +145,37 @@ EOF
 EOF
     
     log_success "System update and configuration completed"
+}
+
+# Load netfilter modules needed for connection tracking
+load_netfilter_modules() {
+    log "Loading netfilter modules..."
+    
+    # Try to load connection tracking modules
+    local modules=("nf_conntrack" "nf_conntrack_ipv4" "xt_conntrack")
+    
+    for module in "${modules[@]}"; do
+        if modprobe "$module" 2>/dev/null; then
+            log "Loaded module: $module"
+        else
+            log_warning "Could not load module: $module (may not be available)"
+        fi
+    done
+    
+    # Add modules to be loaded at boot
+    cat > /etc/modules-load.d/vps-proxy-hub.conf << 'EOF'
+# VPS Proxy Hub - Required kernel modules
+nf_conntrack
+xt_conntrack
+EOF
+    
+    # Try to apply conntrack settings now that modules might be loaded
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
+        log "Applying connection tracking settings..."
+        sysctl -p /etc/sysctl.d/99-vps-proxy-hub-conntrack.conf
+    else
+        log_warning "Connection tracking settings will be applied after reboot"
+    fi
 }
 
 # Create swap file if it doesn't exist
