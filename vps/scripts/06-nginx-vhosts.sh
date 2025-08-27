@@ -290,4 +290,84 @@ reload_nginx() {
     fi
 }
 
-ob
+obtain_ssl_certificates() {
+    log "Obtaining SSL certificates with Let's Encrypt..."
+
+    local email staging_flag=""
+    email=$(get_config_value "tls.email")
+    local use_staging
+    use_staging=$(get_config_value "tls.use_staging" "false")
+
+    if [[ "$use_staging" == "true" ]]; then
+        staging_flag="--staging"
+        log_warning "Using Let's Encrypt staging environment (test certificates)"
+    fi
+
+    if [[ -z "$email" ]]; then
+        log_error "TLS email not configured in config.yaml"
+        log "SSL certificates will need to be obtained manually"
+        return 1
+    fi
+
+    local dry_run_flag=""
+    local dry_run_on_apply
+    dry_run_on_apply=$(get_config_value "ops.certbot_dry_run_on_apply" "false")
+    if [[ "$dry_run_on_apply" == "true" ]]; then
+        dry_run_flag="--dry-run"
+        log "Performing certbot dry run (test mode)"
+    fi
+
+    # Issue certs per site
+    if command -v yq &> /dev/null; then
+        yq eval '.sites[] | .name' "$CONFIG_FILE" | while IFS= read -r site_name; do
+            [[ -n "$site_name" ]] && obtain_site_ssl "$site_name" "$email" "$staging_flag" "$dry_run_flag"
+        done
+    else
+        grep -A 50 "^sites:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r site_name; do
+            [[ -n "$site_name" ]] && obtain_site_ssl "$site_name" "$email" "$staging_flag" "$dry_run_flag"
+        done
+    fi
+}
+
+obtain_site_ssl() {
+    local site_name="$1" email="$2" staging_flag="$3" dry_run_flag="$4"
+
+    log "Obtaining SSL certificate for site: $site_name"
+
+    local server_names
+    if command -v yq &> /dev/null; then
+        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
+    else
+        server_names=$(extract_site_config "$site_name" "server_names")
+    fi
+    server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
+    if [[ -z "$server_names" ]]; then
+        log_error "No server names found for site $site_name"; return 1
+    fi
+
+    local domain_args=""; for d in $server_names; do domain_args+=" -d $d"; done
+    log "Requesting certificate for domains: $server_names"
+
+    # --nginx will add: listen 443 ssl, ssl_certificate(_key), and --redirect
+    if certbot --nginx \
+        --email "$email" \
+        --agree-tos \
+        --no-eff-email \
+        --redirect \
+        $staging_flag \
+        $dry_run_flag \
+        $domain_args; then
+        if [[ -z "$dry_run_flag" ]]; then
+            log_success "SSL certificate obtained for $site_name"
+        else
+            log_success "SSL certificate dry run completed for $site_name"
+        fi
+    else
+        log_error "Failed to obtain SSL certificate for $site_name"
+        log "Check that DNS points to this server and port 80 is reachable"
+        return 1
+    fi
+}
+
+# Run main
+main "$@"
