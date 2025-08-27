@@ -1,0 +1,105 @@
+# VPS Proxy Hub Configuration
+# Central config for a VPS front door (TLS + Nginx) proxying over WireGuard tunnels
+# to one or more home machines.
+
+version: 1
+
+vps:
+  public_ip: "203.0.113.10"          # VPS public IP or DNS
+  ssh_port: 22                        # If you change this, also update UFW open ports
+  timezone: "America/Chicago"
+
+  firewall_open_ports: [22, 80, 443, 51820]   # Keep minimal
+  sysctl:
+    ipv4_forward: true
+
+  wireguard:
+    subnet_cidr: "10.8.0.0/24"
+    vps_address: "10.8.0.1/24"
+    listen_port: 51820
+    # Keys are created on first run and persisted here:
+    private_key_path: "/etc/wireguard/vps-private.key"
+    public_key_path:  "/etc/wireguard/vps-public.key"
+    peers_dir: "/etc/wireguard/peers"         # stores <peername>.pub
+
+tls:
+  email: "you@example.com"
+  use_staging: false                 # set true while testing to avoid rate limits
+  key_type: "ecdsa"                  # ecdsa or rsa
+  elliptic_curve: "secp256r1"        # used when key_type = ecdsa
+
+# Each 'peer' is a home machine that will establish a WireGuard tunnel to the VPS.
+# You will run home/setup.sh <peer-name> on each; it prints the public key to paste into VPS.
+peers:
+  - name: "home-1"
+    address: "10.8.0.2/32"
+    endpoint: "203.0.113.10:51820"   # VPS endpoint (ip:port)
+    keepalive: 25
+    hostname: "home1.local"          # optional, informational
+    home_private_key_path: "/etc/wireguard/home-private.key"
+    home_public_key_path:  "/etc/wireguard/home-public.key"
+
+  - name: "home-2"
+    address: "10.8.0.3/32"
+    endpoint: "203.0.113.10:51820"
+    keepalive: 25
+    hostname: "home2.local"
+    home_private_key_path: "/etc/wireguard/home-private.key"
+    home_public_key_path:  "/etc/wireguard/home-public.key"
+
+# Sites define public domains handled by Nginx on the VPS.
+# Each site maps to a peer and an upstream. Upstream can be:
+#   - a raw port on the peer (e.g., 8080), OR
+#   - a Docker container on that peer (docker: true) with a resolvable container name.
+# The VPS proxies HTTP over the encrypted WireGuard tunnel to the peer.
+sites:
+  - name: "site1"
+    server_names: ["site1.example.com", "www.site1.example.com"]
+    peer: "home-1"
+    upstream:
+      port: 8080           # proxy to http://10.8.0.2:8080
+      docker: false
+    nginx:
+      force_https_redirect: true   # certbot --nginx adds redirect; leave for clarity
+      extra_headers:
+        Strict-Transport-Security: "max-age=15552000; includeSubDomains; preload"
+        X-Content-Type-Options: "nosniff"
+        X-Frame-Options: "SAMEORIGIN"
+        Referrer-Policy: "strict-origin-when-cross-origin"
+
+  - name: "media"
+    server_names: ["media.example.com"]
+    peer: "home-2"
+    upstream:
+      docker: true
+      container_name: "jellyfin"   # VPS will proxy to http://jellyfin:8096 on home-2
+      container_port: 8096
+      docker_network: "media_net"  # optional hint; home script may ensure network/DNS
+    nginx:
+      proxy_read_timeout: "300s"   # useful for media
+      extra_headers:
+        X-Accel-Buffering: "no"
+
+  - name: "wiki"
+    server_names: ["wiki.example.com"]
+    peer: "home-1"
+    upstream:
+      port: 8081
+      docker: false
+
+# Optional defaults the scripts can use if a site/peer omits values.
+defaults:
+  nginx:
+    access_log: "/var/log/nginx/access.log"
+    error_log: "/var/log/nginx/error.log"
+    keepalive_timeout: "15s"
+  wireguard:
+    keepalive: 25
+  docker:
+    network: "bridge"   # default docker network hint for container resolution
+
+# Advanced toggles and housekeeping
+ops:
+  certbot_dry_run_on_apply: true
+  nginx_disable_access_log_for_high_churn: false
+  create_swapfile_gb: 1             # on small VPS, create swap to avoid OOM
