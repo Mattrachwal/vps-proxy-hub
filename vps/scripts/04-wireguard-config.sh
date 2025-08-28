@@ -376,7 +376,7 @@ if [[ $PEERS_ADDED -gt 0 ]]; then
     log_success "Regenerated configuration with $PEERS_ADDED peer(s)"
     
     # Test configuration
-    if ! wg-quick up wg0 --dry-run &>/dev/null; then
+    if ! wg-quick up wg0 &>/dev/null; then
         log_error "WireGuard configuration test failed"
         log "Check configuration manually: wg-quick up wg0 --dry-run"
         exit 1

@@ -234,7 +234,7 @@ enable_wireguard_service() {
     fi
 
     # Validate config before bringing up
-    if ! wg-quick up wg0 --dry-run &>/dev/null; then
+    if ! wg-quick up wg0 &>/dev/null; then
         log_error "WireGuard configuration test failed (wg-quick --dry-run)"
         log "Inspect config: cat /etc/wireguard/wg0.conf"
         return 1
