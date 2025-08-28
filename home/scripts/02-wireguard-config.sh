@@ -8,12 +8,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/utils.sh"
 
-# Global variables
+# Globals set during runtime
 PEER_NAME=""
+PRIVATE_KEY_PATH=""
+PUBLIC_KEY_PATH=""
 
 main() {
     local peer_name="${1:-}"
-    
+
     if [[ -z "$peer_name" ]]; then
         log_error "Peer name is required"
         echo "Usage: $0 <peer-name>"
@@ -21,68 +23,70 @@ main() {
         show_available_peers
         exit 1
     fi
-    
+
     PEER_NAME="$peer_name"
-    
+
     log "Starting WireGuard configuration for peer: $PEER_NAME"
-    
+
     check_root
     check_config
-    
-    # Validate peer name exists in config
+
+    # Validate peer exists
     if ! validate_peer_name "$PEER_NAME"; then
         log_error "Peer '$PEER_NAME' not found in configuration"
         echo "Available peers:"
         show_available_peers
         exit 1
     fi
-    
-    # Generate or load peer keys
+
+    # Generate/load this peer's keys (home side)
     setup_peer_keys
-    
-    # Generate WireGuard configuration
+
+    # Generate WireGuard configuration (resolves VPS pubkey/endpoint from config.yaml)
     generate_wg_config
-    
-    # Enable and start WireGuard service
+
+    # Enable and start wg-quick@wg0 (only if config is complete)
     enable_wireguard_service
-    
-    # Display connection instructions
+
+    # Print status and the command to add this peer on the VPS
     display_connection_instructions
-    
+
     log_success "WireGuard configuration completed for peer: $PEER_NAME"
 }
 
 show_available_peers() {
-    if command -v yq &> /dev/null; then
-        yq eval '.peers[] | "  - " + .name + " (" + .address + ")"' "$CONFIG_FILE"
+    if command -v yq &>/dev/null; then
+        yq eval -r '.peers[] | "  - " + .name + " (" + .address + ")"' "$CONFIG_FILE"
     else
-        grep -A 5 "^peers:" "$CONFIG_FILE" | grep -E "name:|address:" | paste - - | \
-        sed 's/.*name: *["'\'']*/  - /' | sed 's/["'\'']*.* address: */ (/' | sed 's/[)\s]*$/))/' || \
-        log "Check config.yaml for available peer names"
+        log "Install yq for nicer output. Peers listed in $CONFIG_FILE under .peers[]."
     fi
 }
 
 setup_peer_keys() {
     log "Setting up WireGuard keys for peer: $PEER_NAME"
-    
-    # Get key paths from config
+
+    # Paths can be overridden per-peer in config.yaml
     local private_key_path public_key_path
     private_key_path=$(get_peer_config "$PEER_NAME" "home_private_key_path" "/etc/wireguard/home-private.key")
     public_key_path=$(get_peer_config "$PEER_NAME" "home_public_key_path" "/etc/wireguard/home-public.key")
-    
-    # Generate private key if it doesn't exist
+
+    # Ensure directory exists
+    mkdir -p "$(dirname "$private_key_path")"
+    mkdir -p "$(dirname "$public_key_path")"
+
+    # Generate private key if missing
     if [[ ! -f "$private_key_path" ]]; then
-        log "Generating peer private key..."
+        log "Generating peer private key…"
         generate_wg_private_key > "$private_key_path"
         chmod 600 "$private_key_path"
         log_success "Peer private key generated: $private_key_path"
     else
         log "Peer private key already exists: $private_key_path"
     fi
-    
-    # Generate public key if it doesn't exist
+
+    # Generate public key if missing
     if [[ ! -f "$public_key_path" ]]; then
-        log "Generating peer public key..."
+        log "Generating peer public key…"
         local private_key
         private_key=$(cat "$private_key_path")
         generate_wg_public_key "$private_key" > "$public_key_path"
@@ -91,90 +95,108 @@ setup_peer_keys() {
     else
         log "Peer public key already exists: $public_key_path"
     fi
-    
-    # Store paths for later use
+
     PRIVATE_KEY_PATH="$private_key_path"
     PUBLIC_KEY_PATH="$public_key_path"
 }
 
+# Pull the VPS public key and endpoint from config.yaml (preferred) with fallbacks.
+_resolve_vps_identity() {
+    # Preferred: inline public key and endpoint in config.yaml
+    local vps_public_key vps_endpoint vps_public_key_path vps_ip vps_port
+
+    vps_public_key=$(get_config_value "vps.wireguard.public_key" "")
+    vps_endpoint=$(get_config_value "vps.wireguard.endpoint" "")
+
+    # Backward compatible: allow peer-scoped endpoint override (e.g., multi-VPS)
+    if [[ -z "$vps_endpoint" || "$vps_endpoint" == "null" ]]; then
+        vps_endpoint=$(get_peer_config "$PEER_NAME" "endpoint" "")
+    fi
+
+    # If endpoint still empty, try building from public_ip + listen_port
+    if [[ -z "$vps_endpoint" || "$vps_endpoint" == "null" ]]; then
+        vps_ip=$(get_config_value "vps.public_ip" "")
+        vps_port=$(get_config_value "vps.wireguard.listen_port" "51820")
+        if [[ -n "$vps_ip" && "$vps_ip" != "null" ]]; then
+            vps_endpoint="${vps_ip}:${vps_port}"
+        fi
+    fi
+
+    # If public_key not inline, allow a path or /tmp fallback
+    if [[ -z "$vps_public_key" || "$vps_public_key" == "null" ]]; then
+        vps_public_key_path=$(get_config_value "vps.wireguard.public_key_path" "/etc/wireguard/vps-public.key")
+        if [[ -f "$vps_public_key_path" ]]; then
+            vps_public_key=$(cat "$vps_public_key_path" | tr -d '\r\n ')
+        elif [[ -f "/tmp/vps-public.key" ]]; then
+            vps_public_key=$(cat "/tmp/vps-public.key" | tr -d '\r\n ')
+        else
+            log_error "VPS public key not found. Set one of:
+  - vps.wireguard.public_key (inline base64) in config.yaml
+  - vps.wireguard.public_key_path (file path) in config.yaml
+  - or drop the key into /tmp/vps-public.key"
+            exit 1
+        fi
+    fi
+
+    # Light sanity check (WireGuard pubkeys are 44-char base64 ending with '=')
+    if ! [[ "$vps_public_key" =~ ^[A-Za-z0-9+/]{42}==$ ]]; then
+        log_error "vps.wireguard.public_key format looks wrong: '$vps_public_key'"
+        exit 1
+    fi
+
+    if [[ -z "$vps_endpoint" || "$vps_endpoint" == "null" ]]; then
+        log_error "VPS endpoint missing. Set one of:
+  - vps.wireguard.endpoint (e.g., 203.0.113.10:51820) in config.yaml
+  - peers[].endpoint for peer '$PEER_NAME'
+  - or provide vps.public_ip + vps.wireguard.listen_port"
+        exit 1
+    fi
+
+    echo "$vps_public_key|$vps_endpoint"
+}
+
 generate_wg_config() {
     log "Generating WireGuard configuration for peer: $PEER_NAME"
-    
-    # Get peer configuration
-    local peer_address peer_endpoint peer_keepalive vps_public_key_path
+
+    # Per-peer settings
+    local peer_address peer_keepalive
     peer_address=$(get_peer_config "$PEER_NAME" "address")
-    peer_endpoint=$(get_peer_config "$PEER_NAME" "endpoint")
     peer_keepalive=$(get_peer_config "$PEER_NAME" "keepalive" "25")
-    
-    # Get VPS configuration
-    local vps_public_key vps_subnet
-    vps_public_key_path=$(get_config_value "vps.wireguard.public_key_path" "/etc/wireguard/vps-public.key")
+
+    # Global WG subnet (what we route over wg0)
+    local vps_subnet
     vps_subnet=$(get_config_value "vps.wireguard.subnet_cidr" "10.8.0.0/24")
-    
-    # Read private key
+
+    # Required: VPS identity
+    IFS="|" read -r vps_public_key vps_endpoint < <(_resolve_vps_identity)
+
+    # Read this peer's private key
     local private_key
     if [[ -f "$PRIVATE_KEY_PATH" ]]; then
-        private_key=$(cat "$PRIVATE_KEY_PATH")
+        private_key=$(tr -d '\r\n ' < "$PRIVATE_KEY_PATH")
     else
         log_error "Private key not found: $PRIVATE_KEY_PATH"
         exit 1
     fi
-    
-    # For home setup, we need to get VPS public key from the user or config
-    # Since we can't access VPS files from home machine, we'll create a placeholder
-    local vps_public_key="VPS_PUBLIC_KEY_NEEDED"
-    
-    # Check if VPS public key is available in a shared location or config
-    if [[ -f "/tmp/vps-public.key" ]]; then
-        vps_public_key=$(cat "/tmp/vps-public.key")
-        log "Using VPS public key from /tmp/vps-public.key"
-    else
-        log_warning "VPS public key not available - configuration will need manual completion"
-    fi
-    
-    # Generate WireGuard configuration using template
+
     local template_path="$SCRIPT_DIR/../templates/wg0.conf.template"
     local config_path="/etc/wireguard/wg0.conf"
-    
+
+    # Backup existing config safely
+    backup_file "$config_path"
+
     if [[ -f "$template_path" ]]; then
+        # Render template with all placeholders replaced
         substitute_template "$template_path" "$config_path" \
             "PRIVATE_KEY=$private_key" \
             "PEER_ADDRESS=$peer_address" \
             "VPS_PUBLIC_KEY=$vps_public_key" \
-            "VPS_ENDPOINT=$peer_endpoint" \
+            "VPS_ENDPOINT=$vps_endpoint" \
             "VPS_SUBNET=$vps_subnet" \
             "KEEPALIVE=$peer_keepalive"
     else
-        # Generate config directly if template doesn't exist
-        log "Template not found, generating configuration directly..."
-        generate_wg_config_direct "$config_path" "$private_key" "$peer_address" \
-            "$vps_public_key" "$peer_endpoint" "$vps_subnet" "$peer_keepalive"
-    fi
-    
-    # Set proper permissions
-    chmod 600 "$config_path"
-    
-    log_success "WireGuard configuration generated: $config_path"
-    
-    if [[ "$vps_public_key" == "VPS_PUBLIC_KEY_NEEDED" ]]; then
-        log_warning "Configuration requires VPS public key - edit $config_path before starting WireGuard"
-    fi
-}
-
-generate_wg_config_direct() {
-    local config_path="$1"
-    local private_key="$2"
-    local peer_address="$3"
-    local vps_public_key="$4"
-    local vps_endpoint="$5"
-    local vps_subnet="$6"
-    local keepalive="$7"
-    
-    # Backup existing config
-    backup_file "$config_path"
-    
-    # Generate configuration
-    cat > "$config_path" << EOF
+        # Fallback: generate directly
+        cat > "$config_path" <<EOF
 # Home Machine WireGuard Configuration
 # Peer: $PEER_NAME
 # Generated by vps-proxy-hub home setup
@@ -184,11 +206,8 @@ PrivateKey = $private_key
 Address = $peer_address
 DNS = 1.1.1.1, 8.8.8.8
 
-# Routes for accessing services through the tunnel
-# This routes traffic to the VPS subnet through the tunnel
-PostUp = ip route add $vps_subnet dev %i
-
-# Clean up routes on shutdown
+# Route the WG subnet through the tunnel
+PostUp = ip route add $vps_subnet dev %i || true
 PostDown = ip route del $vps_subnet dev %i 2>/dev/null || true
 
 [Peer]
@@ -196,65 +215,48 @@ PostDown = ip route del $vps_subnet dev %i 2>/dev/null || true
 PublicKey = $vps_public_key
 Endpoint = $vps_endpoint
 AllowedIPs = $vps_subnet
-
-# Keep connection alive through NAT/firewalls
-PersistentKeepalive = $keepalive
+PersistentKeepalive = $peer_keepalive
 EOF
-
-    if [[ "$vps_public_key" == "VPS_PUBLIC_KEY_NEEDED" ]]; then
-        # Comment out the peer section if VPS key is not available
-        sed -i 's/^PublicKey = VPS_PUBLIC_KEY_NEEDED/# PublicKey = REPLACE_WITH_VPS_PUBLIC_KEY/' "$config_path"
-        sed -i '/^\[Peer\]/a # CONFIGURATION INCOMPLETE - VPS public key needed' "$config_path"
-        sed -i '/^\[Peer\]/a # Get the VPS public key and replace the placeholder above' "$config_path"
+        log "Generated WireGuard configuration directly"
     fi
-    
-    log "Generated WireGuard configuration directly"
+
+    chmod 600 "$config_path"
+    log_success "WireGuard configuration generated: $config_path"
 }
 
 enable_wireguard_service() {
     log "Configuring WireGuard service for peer: $PEER_NAME"
-    
-    # Check if VPS public key is available
-    if grep -q "VPS_PUBLIC_KEY_NEEDED\|REPLACE_WITH_VPS_PUBLIC_KEY" /etc/wireguard/wg0.conf; then
-        log_warning "WireGuard service not started - VPS public key required"
-        log "Complete the configuration and run: systemctl start wg-quick@wg0"
-        return 0
-    fi
-    
-    # Stop service if running
+
+    # Stop if already running (clean restart)
     if systemctl is-active --quiet wg-quick@wg0; then
-        log "Stopping existing WireGuard service..."
+        log "Stopping existing WireGuard service…"
         systemctl stop wg-quick@wg0
     fi
-    
-    # Test configuration
+
+    # Validate config before bringing up
     if ! wg-quick up wg0 --dry-run &>/dev/null; then
-        log_error "WireGuard configuration test failed"
-        log "Check configuration: wg-quick up wg0 --dry-run"
+        log_error "WireGuard configuration test failed (wg-quick --dry-run)"
+        log "Inspect config: cat /etc/wireguard/wg0.conf"
         return 1
     fi
-    
-    # Enable and start WireGuard
-    systemctl enable wg-quick@wg0
+
+    systemctl enable wg-quick@wg0 >/dev/null
     systemctl start wg-quick@wg0
-    
-    # Wait for service to be ready
+
+    # Wait until the interface appears
     wait_for_service "wg-quick@wg0"
-    
-    # Verify interface is up
+
     if ip link show wg0 &>/dev/null; then
         log_success "WireGuard interface wg0 is up"
-        
-        # Test connectivity to VPS
+
+        # Optional: quick reachability check to VPS wg IP (strip CIDR)
         local vps_ip
         vps_ip=$(get_config_value "vps.wireguard.vps_address" "10.8.0.1/24")
-        vps_ip="${vps_ip%/*}"  # Remove CIDR suffix
-        
-        if ping -c 1 -W 5 "$vps_ip" &>/dev/null; then
-            log_success "Successfully connected to VPS through WireGuard tunnel"
+        vps_ip="${vps_ip%/*}"
+        if ping -c 1 -W 3 "$vps_ip" &>/dev/null; then
+            log_success "Reachable: $vps_ip over WireGuard"
         else
-            log_warning "WireGuard interface is up but cannot reach VPS ($vps_ip)"
-            log "This may be normal if the VPS hasn't been configured with this peer yet"
+            log_warning "wg0 up but cannot reach VPS $vps_ip yet (may be normal until VPS adds this peer)"
         fi
     else
         log_error "WireGuard interface wg0 failed to start"
@@ -265,16 +267,33 @@ enable_wireguard_service() {
 
 display_connection_instructions() {
     log "WireGuard peer setup information:"
-    
-    # Show interface status
-    if command -v wg &> /dev/null && ip link show wg0 &>/dev/null; then
+
+    # Show status if available
+    if command -v wg &>/dev/null && ip link show wg0 &>/dev/null; then
         echo "--- WireGuard Status ---"
         wg show wg0 2>/dev/null || log_warning "WireGuard interface not ready"
     fi
-    
-    # Display the peer information for VPS setup
+
+    # Print the command you need to run on the VPS to add this peer
+    if [[ -f "$PUBLIC_KEY_PATH" ]]; then
+        local home_pub
+        home_pub=$(tr -d '\r\n ' < "$PUBLIC_KEY_PATH")
+        # Pull the home peer address for AllowedIPs (single /32 recommended)
+        local home_addr
+        home_addr=$(get_peer_config "$PEER_NAME" "address")
+        # Convert CIDR to /32 if a /24 was provided for the peer
+        local home_ip="${home_addr%/*}"
+        echo
+        echo "--- Add this peer on the VPS ---"
+        echo "sudo wg set wg0 peer \"$home_pub\" allowed-ips ${home_ip}/32"
+        echo "Then persist it in /etc/wireguard/wg0.conf on the VPS and restart:"
+        echo "sudo systemctl restart wg-quick@wg0"
+        echo
+    fi
+
+    # Also show any peer-specific info (existing helper)
     display_peer_info "$PEER_NAME" "$PUBLIC_KEY_PATH"
 }
 
-# Run main function
+# Run main
 main "$@"
