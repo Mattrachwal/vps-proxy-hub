@@ -21,8 +21,8 @@ vps:
     private_key_path: "/etc/wireguard/vps-private.key"
     public_key_path: "/etc/wireguard/vps-public.key"
     peers_dir: "/etc/wireguard/peers" # stores <peername>.pub
-    vps_public_key: "K7roURJ0k3tPOTHKV+PKlTmR7fYDdgheym5q4kQ+IAs="
-    vps_endpoint: "203.0.113.10:51820" # <-- replace with your VPS public IP:port
+    public_key: "K7roURJ0k3tPOTHKV+PKlTmR7fYDdgheym5q4kQ+IAs="
+    endpoint: "203.0.113.10:51820" # <-- replace with your VPS public IP:port
 
 tls:
   email: "you@example.com"

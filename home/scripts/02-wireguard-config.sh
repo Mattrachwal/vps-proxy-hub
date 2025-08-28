@@ -139,7 +139,7 @@ _resolve_vps_identity() {
     fi
 
     # Light sanity check (WireGuard pubkeys are 44-char base64 ending with '=')
-    if ! [[ "$vps_public_key" =~ ^[A-Za-z0-9+/]{42}==$ ]]; then
+    if ! [[ "$vps_public_key" =~ ^[A-Za-z0-9+/]{42,43}=+$ ]]; then
         log_error "vps.wireguard.public_key format looks wrong: '$vps_public_key'"
         exit 1
     fi
