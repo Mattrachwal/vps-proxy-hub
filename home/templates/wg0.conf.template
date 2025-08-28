@@ -7,13 +7,6 @@ PrivateKey = {{PRIVATE_KEY}}
 Address = {{PEER_ADDRESS}}
 DNS = 1.1.1.1, 8.8.8.8
 
-# Routes for accessing services through the tunnel
-# This routes traffic to the VPS subnet through the tunnel
-PostUp = ip route add {{VPS_SUBNET}} dev %i
-
-# Clean up routes on shutdown
-PostDown = ip route del {{VPS_SUBNET}} dev %i 2>/dev/null || true
-
 [Peer]
 # VPS WireGuard Server
 PublicKey = {{VPS_PUBLIC_KEY}}
