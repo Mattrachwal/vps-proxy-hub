@@ -233,9 +233,9 @@ enable_wireguard_service() {
         systemctl stop wg-quick@wg0
     fi
 
-    # Validate config before bringing up
-    if ! wg-quick up wg0 &>/dev/null; then
-        log_error "WireGuard configuration test failed (wg-quick --dry-run)"
+    # Test config parsing without actually bringing up the interface
+    if ! wg-quick strip wg0 >/dev/null 2>&1; then
+        log_error "WireGuard configuration validation failed"
         log "Inspect config: cat /etc/wireguard/wg0.conf"
         return 1
     fi
