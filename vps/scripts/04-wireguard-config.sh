@@ -200,7 +200,7 @@ setup_peer_management() {
     ensure_directory "$peers_dir" "700"
     
     # Create helper script for adding peer public keys
-    cat > /usr/local/bin/add-peer-key << EOF
+    cat > /usr/local/bin/add-peer-key << 'SCRIPT_EOF'
 #!/bin/bash
 # Fixed Helper script to add a peer public key and regenerate WireGuard config
 
@@ -409,7 +409,7 @@ else
 fi
 
 log_success "Peer $PEER_NAME added successfully!"
-EOF
+SCRIPT_EOF
     
     chmod +x /usr/local/bin/add-peer-key
     log "Created peer management script: /usr/local/bin/add-peer-key"
