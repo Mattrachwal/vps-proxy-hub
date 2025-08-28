@@ -423,6 +423,12 @@ enable_wireguard_service() {
         log "Stopping existing WireGuard service..."
         systemctl stop wg-quick@wg0
     fi
+
+    # Also bring down interface if it exists outside systemd control
+    if ip link show wg0 &>/dev/null; then
+        log "Bringing down existing wg0 interface..."
+        wg-quick down wg0 || true
+    fi
     
     # Enable and start WireGuard
     systemctl enable wg-quick@wg0

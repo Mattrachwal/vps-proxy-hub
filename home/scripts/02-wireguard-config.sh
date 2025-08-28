@@ -233,6 +233,12 @@ enable_wireguard_service() {
         systemctl stop wg-quick@wg0
     fi
 
+    # Also bring down interface if it exists outside systemd control
+    if ip link show wg0 &>/dev/null; then
+        log "Bringing down existing wg0 interface..."
+        wg-quick down wg0 || true
+    fi
+
     # Test config parsing without actually bringing up the interface
     if ! wg-quick strip wg0 >/dev/null 2>&1; then
         log_error "WireGuard configuration validation failed"
