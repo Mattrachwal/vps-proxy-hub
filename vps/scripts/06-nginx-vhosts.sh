@@ -1,11 +1,12 @@
 #!/bin/bash
-# VPS Setup - Nginx Installation and Basic Configuration (FIXED)
+# VPS Setup - Nginx Installation and Basic Configuration (HARDENED)
 # Installs Nginx and configures it for reverse proxy with security headers
 
 set -euo pipefail
 
 # Load utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
 source "$SCRIPT_DIR/utils.sh"
 
 main() {
@@ -21,7 +22,7 @@ main() {
     install_certbot
     configure_nginx_logrotate
 
-    # FIXED: Remove any broken vhosts instead of trying to process them
+    # Clean up broken/template vhosts and normalize filenames
     cleanup_broken_vhosts
 
     enable_nginx_service
@@ -100,7 +101,7 @@ http {
     server { listen 80 default_server; listen [::]:80 default_server; server_name _; return 444; }
 
     include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
+    include /etc/nginx/sites-enabled/*.conf;
 }
 EOF
 
@@ -225,40 +226,61 @@ EOF
     log_success "Nginx log rotation configured"
 }
 
-# FIXED: Clean up any broken vhosts instead of trying to process them
+# --- Cleanup / normalization for vhosts ---
 cleanup_broken_vhosts() {
-    log "Cleaning up any broken virtual host files..."
-    
-    local sites_available="/etc/nginx/sites-available"
-    local sites_enabled="/etc/nginx/sites-enabled"
-    
-    # Check for files with template placeholders and remove them
-    if [[ -d "$sites_available" ]]; then
-        for file in "$sites_available"/vps-proxy-hub-*; do
-            if [[ -f "$file" ]] && grep -q "{{" "$file"; then
-                log_warning "Removing broken vhost with template placeholders: $(basename "$file")"
-                rm -f "$file"
-                # Also remove from sites-enabled
-                rm -f "$sites_enabled/$(basename "$file")"
-            fi
-        done
+    log "Cleaning up any broken or template virtual host files..."
+
+    local sa="/etc/nginx/sites-available"
+    local se="/etc/nginx/sites-enabled"
+
+    ensure_directory "$sa" "755"
+    ensure_directory "$se" "755"
+
+    # A) Rename any extension-less vhosts to .conf and fix symlinks
+    if [[ -d "$sa" ]]; then
+        while IFS= read -r -d '' f; do
+            case "$f" in *.conf) continue;; esac
+            local new="$f.conf"
+            log_warning "Renaming $(basename "$f") -> $(basename "$new")"
+            mv -f "$f" "$new"
+            # Update symlink if old name was linked
+            local oldlink="$se/$(basename "$f")"
+            local newlink="$se/$(basename "$new")"
+            [[ -L "$oldlink" ]] && rm -f "$oldlink"
+            ln -sfn "$new" "$newlink"
+        done < <(find "$sa" -maxdepth 1 -type f -name 'vps-proxy-hub*' -print0)
     fi
-    
-    # Remove any remaining broken symlinks in sites-enabled
-    if [[ -d "$sites_enabled" ]]; then
-        for link in "$sites_enabled"/vps-proxy-hub-*; do
-            if [[ -L "$link" ]] && [[ ! -f "$link" ]]; then
-                log_warning "Removing broken symlink: $(basename "$link")"
-                rm -f "$link"
+
+    # B) Remove any file that still contains {{...}} placeholders
+    if [[ -d "$sa" ]]; then
+        while IFS= read -r -d '' f; do
+            if grep -Eq '{{[A-Za-z0-9_]+}}' "$f"; then
+                log_warning "Removing template vhost (contains placeholders): $(basename "$f")"
+                rm -f "$f"
+                rm -f "$se/$(basename "$f")" 2>/dev/null || true
+                rm -f "$se/$(basename "$f").conf" 2>/dev/null || true
             fi
-        done
+        done < <(find "$sa" -maxdepth 1 -type f -name 'vps-proxy-hub*' -print0)
     fi
-    
+
+    # C) Remove any broken symlinks in sites-enabled
+    if [[ -d "$se" ]]; then
+        while IFS= read -r link; do
+            [[ -n "$link" ]] && log_warning "Removed broken symlink: $(basename "$link")"
+        done < <(find "$se" -maxdepth 1 -xtype l -print -delete)
+    fi
+
     log "Virtual host cleanup completed"
 }
 
 enable_nginx_service() {
     log "Enabling and starting Nginx service..."
+
+    # Guard: fail fast if any template placeholders remain
+    if grep -RqsE '{{[A-Za-z0-9_]+}}' /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null; then
+        log_error "Unrendered vhost template placeholders detected in sites-available/sites-enabled"
+        exit 1
+    fi
 
     if ! nginx -t; then
         log_error "Nginx configuration test failed"; exit 1
