@@ -1,310 +1,410 @@
 #!/bin/bash
-# VPS Setup - Nginx Installation and Basic Configuration (HARDENED)
-# Installs Nginx and configures it for reverse proxy with security headers
+# VPS Setup - Nginx Virtual Hosts Configuration
+# Generates Nginx virtual hosts from config.yaml with proper HTTP+HTTPS setup
 
 set -euo pipefail
 
 # Load utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
 source "$SCRIPT_DIR/utils.sh"
 
 main() {
-    log "Starting Nginx installation and configuration..."
+    log "Starting Nginx virtual hosts configuration..."
 
     check_root
     check_config
 
-    install_nginx
-    configure_nginx_security      # nginx.conf (no ssl_* here)
-    setup_ssl_config              # central SSL knobs (http{} scope)
-    setup_proxy_snippet           # central proxy knobs (include inside location)
-    install_certbot
-    configure_nginx_logrotate
+    # Ensure ACME webroot exists
+    ensure_directory "/var/www/html" "755"
 
-    # Clean up broken/template vhosts and normalize filenames
-    cleanup_broken_vhosts
+    # Process each site in the configuration
+    process_sites
 
-    enable_nginx_service
+    # Test nginx configuration
+    test_nginx_config
 
-    log_success "Nginx installation and basic configuration completed"
+    # Reload nginx to apply sites
+    reload_nginx
+
+    # Obtain SSL certificates and enable HTTPS
+    obtain_ssl_certificates
+
+    log_success "Nginx virtual hosts configuration completed"
 }
 
-install_nginx() {
-    log "Installing Nginx..."
-    if command -v nginx &>/dev/null; then
-        log "Nginx is already installed"
-        return 0
-    fi
-    if command -v apt-get &>/dev/null; then
-        apt-get update
-        apt-get install -y nginx
-    elif command -v yum &>/dev/null; then
-        yum install -y epel-release nginx
-    elif command -v dnf &>/dev/null; then
-        dnf install -y nginx
+# Process all sites from configuration
+process_sites() {
+    log "Processing sites from configuration..."
+
+    # Remove existing VPS Proxy Hub vhosts (clean slate approach)
+    log "Removing existing VPS Proxy Hub virtual host configurations..."
+    rm -f /etc/nginx/sites-enabled/vps-proxy-hub-*
+    rm -f /etc/nginx/sites-available/vps-proxy-hub-*
+
+    if command -v yq &> /dev/null; then
+        yq eval '.sites[] | .name' "$CONFIG_FILE" | while IFS= read -r site_name; do
+            [[ -n "$site_name" ]] && process_site "$site_name"
+        done
     else
-        log_error "Unsupported distribution for Nginx installation"; exit 1
+        # Basic parsing for site names
+        grep -A 50 "^sites:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r site_name; do
+            [[ -n "$site_name" ]] && process_site "$site_name"
+        done
     fi
-    command -v nginx &>/dev/null || { log_error "Nginx installation failed"; exit 1; }
-    log_success "Nginx installed successfully"; nginx -v
 }
 
-configure_nginx_security() {
-    log "Configuring Nginx security settings..."
-    backup_file "/etc/nginx/nginx.conf"
+# Process individual site configuration
+process_site() {
+    local site_name="$1"
+    log "Processing site: $site_name"
 
-    cat > /etc/nginx/nginx.conf << 'EOF'
-# VPS Proxy Hub - Nginx Configuration
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-include /etc/nginx/modules-enabled/*.conf;
+    local server_names peer upstream_host upstream_port
 
-events { worker_connections 4096; use epoll; multi_accept on; }
-
-http {
-    sendfile on; tcp_nopush on; tcp_nodelay on; keepalive_timeout 15;
-    types_hash_max_size 2048; server_tokens off; client_max_body_size 100M;
-
-    client_body_buffer_size 128k;
-    client_header_buffer_size 1k;
-    large_client_header_buffers 4 4k;
-    output_buffers 1 32k;
-    postpone_output 1460;
-
-    client_header_timeout 3m; client_body_timeout 3m; send_timeout 3m;
-
-    include /etc/nginx/mime.types; default_type application/octet-stream;
-
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
-                    '$status $body_bytes_sent "$http_referer" '
-                    '"$http_user_agent" "$http_x_forwarded_for" '
-                    'rt=$request_time uct="$upstream_connect_time" '
-                    'uht="$upstream_header_time" urt="$upstream_response_time"';
-    access_log /var/log/nginx/access.log main;
-    error_log  /var/log/nginx/error.log;
-
-    gzip on; gzip_vary on; gzip_proxied any; gzip_comp_level 6;
-    gzip_types text/plain text/css text/xml text/javascript application/json application/javascript application/xml application/xml+rss application/atom+xml image/svg+xml;
-
-    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
-    limit_req_zone $binary_remote_addr zone=general:10m rate=30r/s;
-
-    map $http_upgrade $connection_upgrade { default upgrade; '' close; }
-
-    server { listen 80 default_server; listen [::]:80 default_server; server_name _; return 444; }
-
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*.conf;
-}
-EOF
-
-    if command -v yum &>/dev/null || command -v dnf &>/dev/null; then
-        sed -i 's/user www-data;/user nginx;/' /etc/nginx/nginx.conf
+    if command -v yq &> /dev/null; then
+        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
+        peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE")
+    else
+        server_names=$(extract_site_config "$site_name" "server_names")
+        peer=$(extract_site_config "$site_name" "peer")
     fi
 
-    ensure_directory "/etc/nginx/conf.d" "755"
-    ensure_directory "/etc/nginx/sites-available" "755"
-    ensure_directory "/etc/nginx/sites-enabled" "755"
+    if [[ -z "$peer" ]]; then
+        log_error "No peer specified for site $site_name"; return 1
+    fi
 
-    # Remove Debian's default site completely (it also uses default_server)
-    rm -f /etc/nginx/sites-enabled/default
-    rm -f /etc/nginx/sites-available/default
-    rm -f /var/www/html/index.*
+    # Get peer IP (WireGuard tunnel IP)
+    local peer_ip
+    peer_ip=$(get_peer_ip "$peer")
+    if [[ -z "$peer_ip" ]]; then
+        log_error "Could not determine IP for peer $peer"; return 1
+    fi
 
-    log_success "Nginx security configuration completed"
+    # Determine upstream configuration
+    local upstream_config
+    upstream_config=$(determine_upstream_config "$site_name" "$peer_ip") || return 1
+
+    IFS="|" read -r upstream_host upstream_port <<< "$upstream_config"
+
+    # Generate the virtual host
+    generate_vhost "$site_name" "$server_names" "$upstream_host" "$upstream_port"
+
+    log_success "Generated virtual host for $site_name"
 }
 
-setup_ssl_config() {
-    log "Setting up SSL/TLS configuration (global)..."
-    cat > /etc/nginx/conf.d/ssl.conf << 'EOF'
-# Global SSL/TLS
-ssl_session_cache shared:le_nginx_SSL:10m;
-ssl_session_timeout 1440m;
-ssl_session_tickets off;
-
-ssl_protocols TLSv1.2 TLSv1.3;
-ssl_prefer_server_ciphers off;
-ssl_ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
-
-ssl_stapling on;
-ssl_stapling_verify on;
-
-resolver 1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 valid=60s;
-resolver_timeout 2s;
-EOF
-    log_success "Global SSL/TLS configuration created"
+# Helper function for basic YAML parsing (when yq not available)
+extract_site_config() {
+    local site_name="$1" key="$2"
+    awk "
+    /name:.*\"?${site_name}\"?/ { in_site = 1; next }
+    in_site && /^[[:space:]]*-[[:space:]]*name:/ && !/name:.*\"?${site_name}\"?/ { in_site = 0 }
+    in_site && /^[^[:space:]]/ && !/name:.*\"?${site_name}\"?/ { in_site = 0 }
+    in_site && /${key}:/ {
+        if (/${key}:.*\[/) {
+            gsub(/.*\[/, \"\"); gsub(/\].*/, \"\"); gsub(/[\"',]/, \" \"); print \$0
+        } else {
+            gsub(/.*${key}:[[:space:]]*[\"']?/, \"\"); gsub(/[\"'].*/, \"\"); print \$0
+        }
+        next
+    }" "$CONFIG_FILE"
 }
 
-setup_proxy_snippet() {
-    log "Creating shared proxy snippet (global)..."
-    cat > /etc/nginx/conf.d/proxy.conf << 'EOF'
-# Shared proxy settings (include inside location{} before proxy_pass)
-proxy_set_header Host $host;
-proxy_set_header X-Real-IP $remote_addr;
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-proxy_set_header X-Forwarded-Proto $scheme;
-proxy_set_header X-Forwarded-Host $host;
-proxy_set_header X-Forwarded-Port $server_port;
-
-proxy_connect_timeout 60s;
-proxy_send_timeout 60s;
-proxy_read_timeout 60s;
-
-proxy_buffering on;
-proxy_buffer_size 4k;
-proxy_buffers 8 4k;
-proxy_busy_buffers_size 8k;
-
-proxy_http_version 1.1;
-proxy_set_header Upgrade $http_upgrade;
-proxy_set_header Connection $connection_upgrade;
-
-proxy_hide_header X-Frame-Options;
-proxy_hide_header X-Content-Type-Options;
-proxy_hide_header X-XSS-Protection;
-EOF
-    log_success "Shared proxy snippet created"
+# Get peer IP address from WireGuard address
+get_peer_ip() {
+    local peer_name="$1"
+    if command -v yq &> /dev/null; then
+        local address
+        address=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .address" "$CONFIG_FILE")
+        echo "${address%/*}"  # Remove CIDR notation
+    else
+        awk "/name:.*\"?${peer_name}\"?/,/^[[:space:]]*-[[:space:]]*name:|^[^[:space:]]/ {
+            if (/address:/) {
+                gsub(/.*address:[[:space:]]*[\"']?/, \"\"); gsub(/\/[0-9]*/, \"\"); gsub(/[\"'].*/, \"\"); print \$0; exit
+            }
+        }" "$CONFIG_FILE"
+    fi
 }
 
-install_certbot() {
-    log "Installing Certbot for Let's Encrypt..."
-    if ! command -v certbot &>/dev/null; then
-        if command -v apt-get &>/dev/null; then
-            apt-get install -y certbot python3-certbot-nginx
-        elif command -v yum &>/dev/null; then
-            yum install -y epel-release certbot python2-certbot-nginx
-        elif command -v dnf &>/dev/null; then
-            dnf install -y certbot python3-certbot-nginx
+# Determine upstream host and port configuration
+determine_upstream_config() {
+    local site_name="$1" peer_ip="$2"
+    local is_docker container_name container_port port
+
+    if command -v yq &> /dev/null; then
+        is_docker=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE")
+        container_name=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_name" "$CONFIG_FILE")
+        container_port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_port" "$CONFIG_FILE")
+        port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.port" "$CONFIG_FILE")
+    else
+        is_docker=$(extract_upstream_config "$site_name" "docker")
+        container_name=$(extract_upstream_config "$site_name" "container_name")
+        container_port=$(extract_upstream_config "$site_name" "container_port")
+        port=$(extract_upstream_config "$site_name" "port")
+    fi
+
+    if [[ "$is_docker" == "true" ]]; then
+        if [[ -n "$container_name" && -n "$container_port" ]]; then
+            # For Docker containers, we still proxy to the peer IP but use the container port
+            # The peer machine should handle container networking internally
+            echo "${peer_ip}|${container_port}"
         else
-            log_warning "Could not install certbot automatically"
+            log_error "Docker upstream specified but container_name or container_port missing for $site_name"
+            return 1
+        fi
+    else
+        if [[ -n "$port" && "$port" != "null" ]]; then
+            echo "${peer_ip}|${port}"
+        else
+            log_error "Port not specified for site $site_name"
+            return 1
         fi
     fi
-    if systemctl list-unit-files | grep -q '^certbot.timer'; then
-        systemctl enable --now certbot.timer || true
-        log "Using systemd certbot.timer for renewals"
-    elif [[ -f /etc/crontab ]] && command -v certbot &>/dev/null; then
-        grep -q "certbot renew" /etc/crontab || echo "0 12 * * * root certbot renew --quiet" >> /etc/crontab
-    fi
-    command -v certbot &>/dev/null || { log_error "Certbot installation failed"; exit 1; }
-    log_success "Certbot installed successfully"; certbot --version
 }
 
-configure_nginx_logrotate() {
-    log "Configuring Nginx log rotation..."
-    [[ -f /etc/logrotate.d/nginx ]] && backup_file "/etc/logrotate.d/nginx"
-    cat > /etc/logrotate.d/nginx << 'EOF'
-/var/log/nginx/*.log {
-    daily
-    missingok
-    rotate 14
-    compress
-    delaycompress
-    notifempty
-    create 0640 www-data adm
-    sharedscripts
-    prerotate
-        if [ -d /etc/logrotate.d/httpd-prerotate ]; then \
-            run-parts /etc/logrotate.d/httpd-prerotate; \
-        fi
-    endscript
-    postrotate
-        invoke-rc.d nginx rotate >/dev/null 2>&1 || true
-    endscript
+# Helper function to extract upstream config (when yq not available)
+extract_upstream_config() {
+    local site_name="$1" key="$2"
+    awk "
+    /name:.*\"?${site_name}\"?/ { in_site = 1; next }
+    in_site && /upstream:/ { in_upstream = 1; next }
+    in_upstream && /^[[:space:]]*[a-zA-Z_]+:/ && !/${key}:/ { if (!/^[[:space:]]+/) in_upstream = 0; next }
+    in_upstream && /${key}:/ { gsub(/.*${key}:[[:space:]]*[\"']?/, \"\"); gsub(/[\"'].*/, \"\"); print \$0; exit }
+    in_site && /^[[:space:]]*-[[:space:]]*name:/ && !/name:.*\"?${site_name}\"?/ { in_site = 0; in_upstream = 0 }
+    " "$CONFIG_FILE"
+}
+
+# Generate virtual host configuration using the new template approach
+generate_vhost() {
+    local site_name="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
+
+    local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}"
+    local template_file="$SCRIPT_DIR/../templates/nginx-vhost.template"
+
+    # Clean up server names (remove quotes, brackets, commas)
+    server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
+
+    # Use template if available, otherwise generate directly
+    if [[ -f "$template_file" ]]; then
+        substitute_template "$template_file" "$vhost_file" \
+            "SERVER_NAMES=$server_names" \
+            "UPSTREAM_HOST=$upstream_host" \
+            "UPSTREAM_PORT=$upstream_port"
+    else
+        # Generate configuration directly with the format you want
+        generate_vhost_direct "$vhost_file" "$server_names" "$upstream_host" "$upstream_port"
+    fi
+
+    # Enable the site (symlink to sites-enabled)
+    ln -sf "$vhost_file" "/etc/nginx/sites-enabled/vps-proxy-hub-${site_name}"
+
+    # Ensure only one site uses default_server (remove if present)
+    rm -f /etc/nginx/sites-enabled/default
+
+    log "Created and enabled virtual host: $vhost_file"
+}
+
+# Generate vhost file directly with the format you specified
+generate_vhost_direct() {
+    local vhost_file="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
+
+    cat > "$vhost_file" << EOF
+# HTTP: ACME + redirect to HTTPS
+server {
+  listen 80;
+  listen [::]:80;
+  server_name $server_names;
+
+  # Let Certbot reach the challenge
+  location ^~ /.well-known/acme-challenge/ {
+    root /var/www/html;
+    try_files \$uri =404;
+  }
+
+  # Redirect to HTTPS (will be uncommented after SSL setup)
+  # return 301 https://\$host\$request_uri;
+}
+
+# HTTPS: proxy to WireGuard peer
+server {
+  listen 443 ssl http2;
+  listen [::]:443 ssl http2;
+  server_name $server_names;
+
+  # SSL configuration will be managed by Certbot
+  # ssl_certificate     /path/to/cert;
+  # ssl_certificate_key /path/to/key;
+
+  # Debug header to confirm upstream
+  add_header X-Proxy-Upstream "${upstream_host}:${upstream_port}" always;
+
+  # Reverse proxy over WireGuard
+  location / {
+    proxy_pass http://${upstream_host}:${upstream_port};
+    include /etc/nginx/conf.d/proxy.conf;
+    proxy_next_upstream error timeout http_502 http_503 http_504;
+  }
+
+  # Optional health check
+  location = /.proxy-hub-health {
+    access_log off;
+    add_header Content-Type text/plain;
+    return 200 "OK\\n";
+  }
 }
 EOF
-    if command -v yum &>/dev/null || command -v dnf &>/dev/null; then
-        sed -i 's/www-data adm/nginx nginx/' /etc/logrotate.d/nginx
-        sed -i 's/invoke-rc.d nginx rotate/systemctl reload nginx/' /etc/logrotate.d/nginx
-    fi
-    log_success "Nginx log rotation configured"
 }
 
-# --- Cleanup / normalization for vhosts ---
-cleanup_broken_vhosts() {
-    log "Cleaning up any broken or template virtual host files..."
-
-    local sa="/etc/nginx/sites-available"
-    local se="/etc/nginx/sites-enabled"
-
-    ensure_directory "$sa" "755"
-    ensure_directory "$se" "755"
-
-    # A) Rename any extension-less vhosts to .conf and fix symlinks
-    if [[ -d "$sa" ]]; then
-        while IFS= read -r -d '' f; do
-            case "$f" in *.conf) continue;; esac
-            local new="$f.conf"
-            log_warning "Renaming $(basename "$f") -> $(basename "$new")"
-            mv -f "$f" "$new"
-            # Update symlink if old name was linked
-            local oldlink="$se/$(basename "$f")"
-            local newlink="$se/$(basename "$new")"
-            [[ -L "$oldlink" ]] && rm -f "$oldlink"
-            ln -sfn "$new" "$newlink"
-        done < <(find "$sa" -maxdepth 1 -type f -name 'vps-proxy-hub*' -print0)
-    fi
-
-    # B) Remove any file that still contains {{...}} placeholders
-    if [[ -d "$sa" ]]; then
-        while IFS= read -r -d '' f; do
-            if grep -Eq '{{[A-Za-z0-9_]+}}' "$f"; then
-                log_warning "Removing template vhost (contains placeholders): $(basename "$f")"
-                rm -f "$f"
-                rm -f "$se/$(basename "$f")" 2>/dev/null || true
-                rm -f "$se/$(basename "$f").conf" 2>/dev/null || true
-            fi
-        done < <(find "$sa" -maxdepth 1 -type f -name 'vps-proxy-hub*' -print0)
-    fi
-
-    # C) Remove any broken symlinks in sites-enabled
-    if [[ -d "$se" ]]; then
-        while IFS= read -r link; do
-            [[ -n "$link" ]] && log_warning "Removed broken symlink: $(basename "$link")"
-        done < <(find "$se" -maxdepth 1 -xtype l -print -delete)
-    fi
-
-    log "Virtual host cleanup completed"
-}
-
-enable_nginx_service() {
-    log "Enabling and starting Nginx service..."
-
-    # Guard: fail fast if any template placeholders remain
-    if grep -RqsE '{{[A-Za-z0-9_]+}}' /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null; then
-        log_error "Unrendered vhost template placeholders detected in sites-available/sites-enabled"
+# Test nginx configuration
+test_nginx_config() {
+    log "Testing Nginx configuration..."
+    if nginx -t; then
+        log_success "Nginx configuration test passed"
+    else
+        log_error "Nginx configuration test failed"
+        log "Check the configuration files in /etc/nginx/sites-available/"
         exit 1
     fi
+}
 
-    if ! nginx -t; then
-        log_error "Nginx configuration test failed"; exit 1
-    fi
-
-    systemctl enable nginx
-    if systemctl is-active --quiet nginx; then
-        systemctl reload nginx || systemctl restart nginx
+# Reload nginx
+reload_nginx() {
+    log "Reloading Nginx configuration..."
+    if systemctl reload nginx; then
+        log_success "Nginx reloaded successfully"
     else
-        systemctl start nginx
+        log_error "Failed to reload Nginx"
+        log "Check nginx status: systemctl status nginx"
+        exit 1
+    fi
+}
+
+# Obtain SSL certificates and enable HTTPS redirects
+obtain_ssl_certificates() {
+    log "Obtaining SSL certificates with Let's Encrypt..."
+
+    local email staging_flag=""
+    email=$(get_config_value "tls.email")
+    local use_staging
+    use_staging=$(get_config_value "tls.use_staging" "false")
+
+    if [[ "$use_staging" == "true" ]]; then
+        staging_flag="--staging"
+        log_warning "Using Let's Encrypt staging environment (test certificates)"
     fi
 
-    wait_for_service "nginx"
+    if [[ -z "$email" ]]; then
+        log_error "TLS email not configured in config.yaml"
+        log "SSL certificates will need to be obtained manually"
+        return 1
+    fi
 
-    nginx -t || { log_error "Nginx configuration test failed after start"; exit 1; }
-
-    # Smoke test (catch-all returns 444)
-    if curl -s -o /dev/null -w "%{http_code}" http://localhost | grep -q "444"; then
-        log_success "Nginx is responding (444 for unknown hosts as expected)"
+    # Process each site for SSL
+    if command -v yq &> /dev/null; then
+        yq eval '.sites[] | .name' "$CONFIG_FILE" | while IFS= read -r site_name; do
+            [[ -n "$site_name" ]] && obtain_site_ssl "$site_name" "$email" "$staging_flag"
+        done
     else
-        log_warning "Nginx response test inconclusive"
+        grep -A 50 "^sites:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r site_name; do
+            [[ -n "$site_name" ]] && obtain_site_ssl "$site_name" "$email" "$staging_flag"
+        done
+    fi
+}
+
+# Obtain SSL certificate for individual site
+obtain_site_ssl() {
+    local site_name="$1" email="$2" staging_flag="$3"
+
+    log "Obtaining SSL certificate for site: $site_name"
+
+    # Get server names for the site
+    local server_names
+    if command -v yq &> /dev/null; then
+        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
+    else
+        server_names=$(extract_site_config "$site_name" "server_names")
     fi
 
-    log_success "Nginx service is running and enabled"
+    server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
+
+    if [[ -z "$server_names" ]]; then
+        log_error "No server names found for site $site_name"
+        return 1
+    fi
+
+    # Build domain arguments for certbot
+    local domain_args=""
+    for domain in $server_names; do
+        domain_args+=" -d $domain"
+    done
+
+    log "Requesting certificate for domains: $server_names"
+
+    # Check for dry run mode
+    local dry_run_flag=""
+    local dry_run_on_apply
+    dry_run_on_apply=$(get_config_value "ops.certbot_dry_run_on_apply" "false")
+    if [[ "$dry_run_on_apply" == "true" ]]; then
+        dry_run_flag="--dry-run"
+        log "Performing certbot dry run (test mode)"
+    fi
+
+    # Run certbot to obtain certificate and configure nginx
+    if [[ -n "$dry_run_flag" ]]; then
+        # Dry run - just test certificate issuance
+        if certbot certonly --nginx \
+            --email "$email" \
+            --agree-tos \
+            --no-eff-email \
+            $staging_flag \
+            --dry-run \
+            $domain_args; then
+            log_success "SSL certificate dry run completed for $site_name"
+        else
+            log_error "Failed certbot dry run for $site_name"
+            return 1
+        fi
+    else
+        # Real certificate issuance and nginx configuration
+        if certbot --nginx \
+            --email "$email" \
+            --agree-tos \
+            --no-eff-email \
+            --redirect \
+            $staging_flag \
+            $domain_args; then
+            log_success "SSL certificate obtained and configured for $site_name"
+            
+            # Enable HTTPS redirect in the HTTP block
+            enable_https_redirect "$site_name"
+        else
+            log_error "Failed to obtain SSL certificate for $site_name"
+            log "Check that:"
+            log "  - DNS records point to this VPS"
+            log "  - Port 80 is accessible from the internet"
+            log "  - No other web server is using port 80"
+            return 1
+        fi
+    fi
+}
+
+# Enable HTTPS redirect in HTTP server block after SSL is configured
+enable_https_redirect() {
+    local site_name="$1"
+    local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}"
+    
+    if [[ -f "$vhost_file" ]]; then
+        # Uncomment the redirect line if it's commented
+        sed -i 's/# return 301 https:/return 301 https:/' "$vhost_file"
+        
+        # If the redirect line doesn't exist, add it
+        if ! grep -q "return 301 https:" "$vhost_file"; then
+            # Add redirect after the ACME location block in HTTP server
+            sed -i '/location.*acme-challenge/,/}/ { 
+                /}/ a\\n  # Redirect to HTTPS\n  return 301 https://$host$request_uri;
+            }' "$vhost_file"
+        fi
+        
+        log "Enabled HTTPS redirect for $site_name"
+    fi
 }
 
 # Run main function
