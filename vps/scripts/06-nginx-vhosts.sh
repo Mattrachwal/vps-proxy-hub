@@ -1,5 +1,5 @@
 #!/bin/bash
-# VPS Setup - Nginx Virtual Hosts Configuration
+# VPS Setup - Nginx Virtual Hosts Configuration (FIXED)
 # Generates Nginx virtual hosts from config.yaml with proper HTTP+HTTPS setup
 
 set -euo pipefail
@@ -172,26 +172,17 @@ extract_upstream_config() {
     " "$CONFIG_FILE"
 }
 
-# Generate virtual host configuration using the new template approach
+# Generate virtual host configuration - FIXED VERSION
 generate_vhost() {
     local site_name="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
     local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}"
-    local template_file="$SCRIPT_DIR/../templates/nginx-vhost.template"
 
     # Clean up server names (remove quotes, brackets, commas)
     server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
 
-    # Use template if available, otherwise generate directly
-    if [[ -f "$template_file" ]]; then
-        substitute_template "$template_file" "$vhost_file" \
-            "SERVER_NAMES=$server_names" \
-            "UPSTREAM_HOST=$upstream_host" \
-            "UPSTREAM_PORT=$upstream_port"
-    else
-        # Generate configuration directly with the format you want
-        generate_vhost_direct "$vhost_file" "$server_names" "$upstream_host" "$upstream_port"
-    fi
+    # Always generate configuration directly (ignore template with undefined placeholders)
+    generate_vhost_direct "$vhost_file" "$server_names" "$upstream_host" "$upstream_port"
 
     # Enable the site (symlink to sites-enabled)
     ln -sf "$vhost_file" "/etc/nginx/sites-enabled/vps-proxy-hub-${site_name}"
@@ -202,7 +193,7 @@ generate_vhost() {
     log "Created and enabled virtual host: $vhost_file"
 }
 
-# Generate vhost file directly with the format you specified
+# Generate vhost file directly - FIXED VERSION
 generate_vhost_direct() {
     local vhost_file="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
