@@ -326,11 +326,12 @@ extract_upstream_config() {
     ' "$CONFIG_FILE"
 }
 
-# Generate virtual host configuration
+# Generate virtual host configuration using template
 generate_vhost() {
     local site_name="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
     local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}.conf"
+    local template_path="$SCRIPT_DIR/../templates/nginx-vhost.template"
 
     # Clean up server names (remove extra whitespace and quotes)
     server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ' | sed 's/^ *//; s/ *$//')
@@ -338,8 +339,13 @@ generate_vhost() {
     log "Generating vhost for $site_name with domains: $server_names"
     log "Upstream: ${upstream_host}:${upstream_port}"
 
-    # Generate configuration directly
-    generate_vhost_direct "$vhost_file" "$server_names" "$upstream_host" "$upstream_port"
+    # Use template if available, otherwise generate directly
+    if [[ -f "$template_path" ]]; then
+        generate_vhost_from_template "$vhost_file" "$template_path" "$server_names" "$upstream_host" "$upstream_port"
+    else
+        log_warning "Template not found, generating configuration directly..."
+        generate_vhost_direct "$vhost_file" "$server_names" "$upstream_host" "$upstream_port"
+    fi
 
     # Enable the site (symlink to sites-enabled)
     ln -sf "$vhost_file" "/etc/nginx/sites-enabled/vps-proxy-hub-${site_name}.conf"
@@ -347,7 +353,39 @@ generate_vhost() {
     log "Created and enabled virtual host: $vhost_file"
 }
 
-# Generate vhost file directly
+# Generate vhost from template with proper substitution
+generate_vhost_from_template() {
+    local vhost_file="$1" template_path="$2" server_names="$3" upstream_host="$4" upstream_port="$5"
+
+    # Read the template
+    local template_content
+    template_content=$(cat "$template_path")
+
+    # Define the HTTP body (initially empty, will be filled after SSL setup)
+    local http_body="  # Redirect to HTTPS (will be enabled after SSL setup)
+  # return 301 https://\$host\$request_uri;"
+
+    # Define the SSL block (placeholder for certbot)
+    local ssl_block="  # SSL configuration will be managed by Certbot
+  # ssl_certificate     /etc/letsencrypt/live/DOMAIN/fullchain.pem;
+  # ssl_certificate_key /etc/letsencrypt/live/DOMAIN/privkey.pem;
+  # include /etc/letsencrypt/options-ssl-nginx.conf;
+  # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;"
+
+    # Perform substitutions
+    template_content="${template_content//\{\{SERVER_NAMES\}\}/$server_names}"
+    template_content="${template_content//\{\{UPSTREAM_HOST\}\}/$upstream_host}"
+    template_content="${template_content//\{\{UPSTREAM_PORT\}\}/$upstream_port}"
+    template_content="${template_content//\{\{HTTP_BODY\}\}/$http_body}"
+    template_content="${template_content//\{\{SSL_BLOCK\}\}/$ssl_block}"
+
+    # Write the final configuration
+    echo "$template_content" > "$vhost_file"
+
+    log "Generated vhost from template: $vhost_file"
+}
+
+# Generate vhost file directly (fallback when template not available)
 generate_vhost_direct() {
     local vhost_file="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
@@ -375,8 +413,10 @@ server {
     server_name $server_names;
 
     # SSL configuration will be managed by Certbot
-    # ssl_certificate     /path/to/cert;
-    # ssl_certificate_key /path/to/key;
+    # ssl_certificate     /etc/letsencrypt/live/DOMAIN/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/DOMAIN/privkey.pem;
+    # include /etc/letsencrypt/options-ssl-nginx.conf;
+    # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
     # Debug header to confirm upstream
     add_header X-Proxy-Upstream "${upstream_host}:${upstream_port}" always;
