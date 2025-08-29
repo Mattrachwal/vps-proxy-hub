@@ -1,6 +1,6 @@
 #!/bin/bash
 # Home Machine Setup - WireGuard Installation
-# Installs WireGuard and prepares the environment for peer configuration
+# Installs WireGuard and resolvconf (or handles DNS= gracefully)
 
 set -euo pipefail
 
@@ -17,6 +17,9 @@ main() {
     
     # Install WireGuard based on the distribution
     install_wireguard
+    
+    # Install resolvconf or handle DNS= lines gracefully
+    handle_resolvconf
     
     # Create WireGuard directory structure
     setup_wireguard_directories
@@ -49,7 +52,8 @@ install_wireguard() {
             apt-get update
         fi
         
-        apt-get install -y wireguard wireguard-tools
+        # Install WireGuard and try to install resolvconf
+        apt-get install -y wireguard wireguard-tools || apt install -y wireguard wireguard-tools
         
     elif command -v yum &> /dev/null; then
         # CentOS/RHEL installation
@@ -86,6 +90,32 @@ install_wireguard() {
     else
         log_error "WireGuard installation failed"
         exit 1
+    fi
+}
+
+handle_resolvconf() {
+    log "Handling resolvconf for DNS configuration..."
+    
+    # Try to install resolvconf
+    if ! command -v resolvconf >/dev/null 2>&1; then
+        log "resolvconf not found, attempting to install..."
+        
+        if command -v apt-get &> /dev/null; then
+            apt-get install -y resolvconf || true
+        elif command -v yum &> /dev/null; then
+            yum install -y resolvconf || true
+        elif command -v dnf &> /dev/null; then
+            dnf install -y resolvconf || true
+        fi
+        
+        # Check if installation succeeded
+        if command -v resolvconf >/dev/null 2>&1; then
+            log_success "resolvconf installed successfully"
+        else
+            log_warning "Could not install resolvconf - DNS= lines will be removed from WireGuard config to prevent failures"
+        fi
+    else
+        log "resolvconf is already available"
     fi
 }
 

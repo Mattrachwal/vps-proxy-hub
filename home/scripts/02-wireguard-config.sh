@@ -1,6 +1,6 @@
 #!/bin/bash
 # Home Machine Setup - WireGuard Configuration
-# Configures WireGuard peer to connect to VPS through encrypted tunnel
+# Configures WireGuard peer with proper DNS handling and route management
 
 set -euo pipefail
 
@@ -42,7 +42,7 @@ main() {
     # Generate/load this peer's keys (home side)
     setup_peer_keys
 
-    # Generate WireGuard configuration (resolves VPS pubkey/endpoint from config.yaml)
+    # Generate WireGuard configuration with proper route handling
     generate_wg_config
 
     # Enable and start wg-quick@wg0 (only if config is complete)
@@ -163,6 +163,12 @@ generate_wg_config() {
     peer_address=$(get_peer_config "$PEER_NAME" "address")
     peer_keepalive=$(get_peer_config "$PEER_NAME" "keepalive" "25")
 
+    # Ensure Address is /24 (not /32)
+    case "$peer_address" in
+      */24) ;;
+      *) peer_address="${peer_address%/*}/24" ;;
+    esac
+
     # Global WG subnet (what we route over wg0)
     local vps_subnet
     vps_subnet=$(get_config_value "vps.wireguard.subnet_cidr" "10.8.0.0/24")
@@ -193,7 +199,8 @@ generate_wg_config() {
             "VPS_PUBLIC_KEY=$vps_public_key" \
             "VPS_ENDPOINT=$vps_endpoint" \
             "VPS_SUBNET=$vps_subnet" \
-            "KEEPALIVE=$peer_keepalive"
+            "KEEPALIVE=$peer_keepalive" \
+            "PEER_NAME=$PEER_NAME"
     else
         # Fallback: generate directly
         cat > "$config_path" <<EOF
@@ -221,6 +228,26 @@ EOF
     fi
 
     chmod 600 "$config_path"
+
+    # Handle DNS= line removal if resolvconf is missing
+    if ! command -v resolvconf >/dev/null 2>&1; then
+        log "resolvconf not available, removing DNS= line to prevent wg-quick failure"
+        sed -i 's/^DNS *=.*$/# DNS removed (resolvconf not installed)/' "$config_path"
+    fi
+
+    # Avoid duplicate routes with AllowedIPs
+    if grep -q '^AllowedIPs *= *'"$vps_subnet" "$config_path"; then
+        # Let wg-quick install the route from AllowedIPs → remove manual hooks
+        log "Removing manual routing (AllowedIPs already covers the subnet)"
+        sed -i '/^PostUp = ip route add .*$/d' "$config_path"
+        sed -i '/^PostDown = ip route del .*$/d' "$config_path"
+    else
+        # If you want to keep manual routing, make it idempotent
+        log "Using manual routing with Table = off for idempotent routes"
+        awk '1;/^\[Interface\]$/{print "Table = off"}' "$config_path" > "$config_path.new" && mv "$config_path.new" "$config_path"
+        sed -i 's|^PostUp = ip route add |PostUp = ip route replace |' "$config_path"
+    fi
+
     log_success "WireGuard configuration generated: $config_path"
 }
 
@@ -294,6 +321,9 @@ display_connection_instructions() {
         echo "sudo wg set wg0 peer \"$home_pub\" allowed-ips ${home_ip}/32"
         echo "Then persist it in /etc/wireguard/wg0.conf on the VPS and restart:"
         echo "sudo systemctl restart wg-quick@wg0"
+        echo
+        echo "OR use the helper script:"
+        echo "sudo add-peer-key $PEER_NAME '$home_pub'"
         echo
     fi
 
