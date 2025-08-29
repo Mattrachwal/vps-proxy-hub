@@ -41,15 +41,46 @@ process_sites() {
     rm -f /etc/nginx/sites-enabled/vps-proxy-hub-*
     rm -f /etc/nginx/sites-available/vps-proxy-hub-*
 
+    local sites_processed=0
+    
     if command -v yq &> /dev/null; then
-        yq eval '.sites[] | .name' "$CONFIG_FILE" | while IFS= read -r site_name; do
-            [[ -n "$site_name" ]] && process_site "$site_name"
-        done
+        # Use yq to get all site names
+        local site_names
+        site_names=$(yq eval '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null || echo "")
+        
+        if [[ -n "$site_names" ]]; then
+            while IFS= read -r site_name; do
+                if [[ -n "$site_name" && "$site_name" != "null" ]]; then
+                    process_site "$site_name"
+                    ((sites_processed++))
+                fi
+            done <<< "$site_names"
+        fi
     else
-        # Basic parsing for site names
-        grep -A 50 "^sites:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r site_name; do
-            [[ -n "$site_name" ]] && process_site "$site_name"
-        done
+        # Basic parsing for site names without yq
+        local site_names
+        site_names=$(awk '/^sites:/,/^[a-zA-Z_]/ {
+            if (/^\s*-\s*name:/) {
+                gsub(/^\s*-\s*name:\s*["'"'"']?/, "")
+                gsub(/["'"'"'].*$/, "")
+                if (length($0) > 0) print $0
+            }
+        }' "$CONFIG_FILE")
+        
+        if [[ -n "$site_names" ]]; then
+            while IFS= read -r site_name; do
+                if [[ -n "$site_name" ]]; then
+                    process_site "$site_name"
+                    ((sites_processed++))
+                fi
+            done <<< "$site_names"
+        fi
+    fi
+    
+    if [[ $sites_processed -eq 0 ]]; then
+        log_warning "No sites found in configuration"
+    else
+        log_success "Processed $sites_processed site(s)"
     fi
 }
 
@@ -61,22 +92,31 @@ process_site() {
     local server_names peer upstream_host upstream_port
 
     if command -v yq &> /dev/null; then
-        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
-        peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE")
+        # Get server names as a space-separated string
+        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null || echo "")
+        peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE" 2>/dev/null || echo "")
     else
         server_names=$(extract_site_config "$site_name" "server_names")
         peer=$(extract_site_config "$site_name" "peer")
     fi
 
-    if [[ -z "$peer" ]]; then
-        log_error "No peer specified for site $site_name"; return 1
+    # Validate required fields
+    if [[ -z "$server_names" || "$server_names" == "null" ]]; then
+        log_error "No server names found for site $site_name"
+        return 1
+    fi
+
+    if [[ -z "$peer" || "$peer" == "null" ]]; then
+        log_error "No peer specified for site $site_name"
+        return 1
     fi
 
     # Get peer IP (WireGuard tunnel IP)
     local peer_ip
     peer_ip=$(get_peer_ip "$peer")
-    if [[ -z "$peer_ip" ]]; then
-        log_error "Could not determine IP for peer $peer"; return 1
+    if [[ -z "$peer_ip" || "$peer_ip" == "null" ]]; then
+        log_error "Could not determine IP for peer $peer"
+        return 1
     fi
 
     # Determine upstream configuration
@@ -84,6 +124,12 @@ process_site() {
     upstream_config=$(determine_upstream_config "$site_name" "$peer_ip") || return 1
 
     IFS="|" read -r upstream_host upstream_port <<< "$upstream_config"
+
+    # Validate upstream configuration
+    if [[ -z "$upstream_host" || -z "$upstream_port" ]]; then
+        log_error "Invalid upstream configuration for site $site_name"
+        return 1
+    fi
 
     # Generate the virtual host
     generate_vhost "$site_name" "$server_names" "$upstream_host" "$upstream_port"
@@ -94,33 +140,108 @@ process_site() {
 # Helper function for basic YAML parsing (when yq not available)
 extract_site_config() {
     local site_name="$1" key="$2"
-    awk "
-    /name:.*\"?${site_name}\"?/ { in_site = 1; next }
-    in_site && /^[[:space:]]*-[[:space:]]*name:/ && !/name:.*\"?${site_name}\"?/ { in_site = 0 }
-    in_site && /^[^[:space:]]/ && !/name:.*\"?${site_name}\"?/ { in_site = 0 }
-    in_site && /${key}:/ {
-        if (/${key}:.*\[/) {
-            gsub(/.*\[/, \"\"); gsub(/\].*/, \"\"); gsub(/[\"',]/, \" \"); print \$0
+    
+    # Find the site section and extract the key
+    awk -v site="$site_name" -v key="$key" '
+    BEGIN { in_site = 0; found = 0 }
+    
+    # Match site by name
+    /^\s*-\s*name:/ {
+        if ($0 ~ site) {
+            in_site = 1
+            found = 1
+            next
         } else {
-            gsub(/.*${key}:[[:space:]]*[\"']?/, \"\"); gsub(/[\"'].*/, \"\"); print \$0
+            in_site = 0
         }
-        next
-    }" "$CONFIG_FILE"
+    }
+    
+    # Exit current site when we hit another site or top-level key
+    in_site && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !/^\s*-\s*name:.*'"$site_name"'/ {
+        in_site = 0
+    }
+    
+    # Extract the value when in the correct site
+    in_site && $0 ~ key {
+        if (key == "server_names") {
+            # Handle array format [item1, item2] or - item format
+            if ($0 ~ /\[.*\]/) {
+                # Extract array format
+                gsub(/.*\[/, "")
+                gsub(/\].*/, "")
+                gsub(/["'"'"',]/, " ")
+                gsub(/\s+/, " ")
+                gsub(/^\s+|\s+$/, "")
+                print
+                exit
+            } else {
+                # Look for array items on following lines
+                values = ""
+                getline
+                while ($0 ~ /^\s*-/ || $0 ~ /^\s+"/) {
+                    gsub(/^\s*-\s*["'"'"']?/, "")
+                    gsub(/["'"'"'].*$/, "")
+                    if (length($0) > 0) {
+                        if (values) values = values " " $0
+                        else values = $0
+                    }
+                    if ((getline) <= 0) break
+                }
+                print values
+                exit
+            }
+        } else {
+            # Extract simple value
+            gsub(/.*'"$key"':\s*["'"'"']?/, "")
+            gsub(/["'"'"'].*$/, "")
+            print
+            exit
+        }
+    }
+    ' "$CONFIG_FILE"
 }
 
 # Get peer IP address from WireGuard address
 get_peer_ip() {
     local peer_name="$1"
+    
     if command -v yq &> /dev/null; then
         local address
-        address=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .address" "$CONFIG_FILE")
-        echo "${address%/*}"  # Remove CIDR notation
+        address=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .address" "$CONFIG_FILE" 2>/dev/null || echo "")
+        if [[ -n "$address" && "$address" != "null" ]]; then
+            echo "${address%/*}"  # Remove CIDR notation
+        fi
     else
-        awk "/name:.*\"?${peer_name}\"?/,/^[[:space:]]*-[[:space:]]*name:|^[^[:space:]]/ {
-            if (/address:/) {
-                gsub(/.*address:[[:space:]]*[\"']?/, \"\"); gsub(/\/[0-9]*/, \"\"); gsub(/[\"'].*/, \"\"); print \$0; exit
+        # Basic parsing
+        awk -v peer="$peer_name" '
+        BEGIN { in_peer = 0 }
+        
+        # Match peer by name
+        /^\s*-\s*name:/ {
+            if ($0 ~ peer) {
+                in_peer = 1
+                next
+            } else {
+                in_peer = 0
             }
-        }" "$CONFIG_FILE"
+        }
+        
+        # Exit current peer when we hit another peer or top-level key
+        in_peer && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !/^\s*-\s*name:.*'"$peer_name"'/ {
+            in_peer = 0
+        }
+        
+        # Extract address
+        in_peer && /address:/ {
+            gsub(/.*address:\s*["'"'"']?/, "")
+            gsub(/\/[0-9]*/, "")  # Remove CIDR
+            gsub(/["'"'"'].*$/, "")
+            if (length($0) > 0) {
+                print
+                exit
+            }
+        }
+        ' "$CONFIG_FILE"
     fi
 }
 
@@ -130,10 +251,10 @@ determine_upstream_config() {
     local is_docker container_name container_port port
 
     if command -v yq &> /dev/null; then
-        is_docker=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE")
-        container_name=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_name" "$CONFIG_FILE")
-        container_port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_port" "$CONFIG_FILE")
-        port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.port" "$CONFIG_FILE")
+        is_docker=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE" 2>/dev/null || echo "false")
+        container_name=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_name" "$CONFIG_FILE" 2>/dev/null || echo "")
+        container_port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_port" "$CONFIG_FILE" 2>/dev/null || echo "")
+        port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.port" "$CONFIG_FILE" 2>/dev/null || echo "")
     else
         is_docker=$(extract_upstream_config "$site_name" "docker")
         container_name=$(extract_upstream_config "$site_name" "container_name")
@@ -142,7 +263,7 @@ determine_upstream_config() {
     fi
 
     if [[ "$is_docker" == "true" ]]; then
-        if [[ -n "$container_name" && -n "$container_port" ]]; then
+        if [[ -n "$container_name" && "$container_name" != "null" && -n "$container_port" && "$container_port" != "null" ]]; then
             # For Docker containers, we still proxy to the peer IP but use the container port
             # The peer machine should handle container networking internally
             echo "${peer_ip}|${container_port}"
@@ -163,92 +284,116 @@ determine_upstream_config() {
 # Helper function to extract upstream config (when yq not available)
 extract_upstream_config() {
     local site_name="$1" key="$2"
-    awk "
-    /name:.*\"?${site_name}\"?/ { in_site = 1; next }
-    in_site && /upstream:/ { in_upstream = 1; next }
-    in_upstream && /^[[:space:]]*[a-zA-Z_]+:/ && !/${key}:/ { if (!/^[[:space:]]+/) in_upstream = 0; next }
-    in_upstream && /${key}:/ { gsub(/.*${key}:[[:space:]]*[\"']?/, \"\"); gsub(/[\"'].*/, \"\"); print \$0; exit }
-    in_site && /^[[:space:]]*-[[:space:]]*name:/ && !/name:.*\"?${site_name}\"?/ { in_site = 0; in_upstream = 0 }
-    " "$CONFIG_FILE"
+    
+    awk -v site="$site_name" -v key="$key" '
+    BEGIN { in_site = 0; in_upstream = 0 }
+    
+    # Match site by name
+    /^\s*-\s*name:/ {
+        if ($0 ~ site) {
+            in_site = 1
+            next
+        } else {
+            in_site = 0
+            in_upstream = 0
+        }
+    }
+    
+    # Enter upstream section
+    in_site && /upstream:/ {
+        in_upstream = 1
+        next
+    }
+    
+    # Exit upstream section
+    in_upstream && /^\s*[a-zA-Z_]+:/ && !/^\s+/ && !/'"$key"':/ {
+        in_upstream = 0
+    }
+    
+    # Exit site
+    in_site && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !/^\s*-\s*name:.*'"$site_name"'/ {
+        in_site = 0
+        in_upstream = 0
+    }
+    
+    # Extract value
+    in_upstream && $0 ~ key {
+        gsub(/.*'"$key"':\s*["'"'"']?/, "")
+        gsub(/["'"'"'].*$/, "")
+        print
+        exit
+    }
+    ' "$CONFIG_FILE"
 }
 
-# Generate virtual host configuration using the new template approach
+# Generate virtual host configuration
 generate_vhost() {
     local site_name="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
-    local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}"
-    local template_file="$SCRIPT_DIR/../templates/nginx-vhost.template"
+    local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}.conf"
 
-    # Clean up server names (remove quotes, brackets, commas)
-    server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
+    # Clean up server names (remove extra whitespace and quotes)
+    server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ' | sed 's/^ *//; s/ *$//')
 
-    # Use template if available, otherwise generate directly
-    if [[ -f "$template_file" ]]; then
-        substitute_template "$template_file" "$vhost_file" \
-            "SERVER_NAMES=$server_names" \
-            "UPSTREAM_HOST=$upstream_host" \
-            "UPSTREAM_PORT=$upstream_port"
-    else
-        # Generate configuration directly with the format you want
-        generate_vhost_direct "$vhost_file" "$server_names" "$upstream_host" "$upstream_port"
-    fi
+    log "Generating vhost for $site_name with domains: $server_names"
+    log "Upstream: ${upstream_host}:${upstream_port}"
+
+    # Generate configuration directly
+    generate_vhost_direct "$vhost_file" "$server_names" "$upstream_host" "$upstream_port"
 
     # Enable the site (symlink to sites-enabled)
-    ln -sf "$vhost_file" "/etc/nginx/sites-enabled/vps-proxy-hub-${site_name}"
-
-    # Ensure only one site uses default_server (remove if present)
-    rm -f /etc/nginx/sites-enabled/default
+    ln -sf "$vhost_file" "/etc/nginx/sites-enabled/vps-proxy-hub-${site_name}.conf"
 
     log "Created and enabled virtual host: $vhost_file"
 }
 
-# Generate vhost file directly with the format you specified
+# Generate vhost file directly
 generate_vhost_direct() {
     local vhost_file="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
     cat > "$vhost_file" << EOF
 # HTTP: ACME + redirect to HTTPS
 server {
-  listen 80;
-  listen [::]:80;
-  server_name $server_names;
+    listen 80;
+    listen [::]:80;
+    server_name $server_names;
 
-  # Let Certbot reach the challenge
-  location ^~ /.well-known/acme-challenge/ {
-    root /var/www/html;
-    try_files \$uri =404;
-  }
+    # Let Certbot reach the challenge
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        try_files \$uri =404;
+    }
 
-  # Redirect to HTTPS (will be uncommented after SSL setup)
-  # return 301 https://\$host\$request_uri;
+    # Redirect to HTTPS (will be uncommented after SSL setup)
+    # return 301 https://\$host\$request_uri;
 }
 
 # HTTPS: proxy to WireGuard peer
 server {
-  listen 443 ssl http2;
-  listen [::]:443 ssl http2;
-  server_name $server_names;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $server_names;
 
-  # SSL configuration will be managed by Certbot
-  # ssl_certificate     /path/to/cert;
-  # ssl_certificate_key /path/to/key;
+    # SSL configuration will be managed by Certbot
+    # ssl_certificate     /path/to/cert;
+    # ssl_certificate_key /path/to/key;
 
-  # Debug header to confirm upstream
-  add_header X-Proxy-Upstream "${upstream_host}:${upstream_port}" always;
+    # Debug header to confirm upstream
+    add_header X-Proxy-Upstream "${upstream_host}:${upstream_port}" always;
 
-  # Reverse proxy over WireGuard
-  location / {
-    proxy_pass http://${upstream_host}:${upstream_port};
-    include /etc/nginx/conf.d/proxy.conf;
-    proxy_next_upstream error timeout http_502 http_503 http_504;
-  }
+    # Reverse proxy over WireGuard
+    location / {
+        proxy_pass http://${upstream_host}:${upstream_port};
+        include /etc/nginx/conf.d/proxy.conf;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+    }
 
-  # Optional health check
-  location = /.proxy-hub-health {
-    access_log off;
-    add_header Content-Type text/plain;
-    return 200 "OK\\n";
-  }
+    # Optional health check
+    location = /.proxy-hub-health {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "OK\\n";
+    }
 }
 EOF
 }
@@ -291,21 +436,51 @@ obtain_ssl_certificates() {
         log_warning "Using Let's Encrypt staging environment (test certificates)"
     fi
 
-    if [[ -z "$email" ]]; then
+    if [[ -z "$email" || "$email" == "null" ]]; then
         log_error "TLS email not configured in config.yaml"
         log "SSL certificates will need to be obtained manually"
         return 1
     fi
 
+    local sites_processed=0
+
     # Process each site for SSL
     if command -v yq &> /dev/null; then
-        yq eval '.sites[] | .name' "$CONFIG_FILE" | while IFS= read -r site_name; do
-            [[ -n "$site_name" ]] && obtain_site_ssl "$site_name" "$email" "$staging_flag"
-        done
+        local site_names
+        site_names=$(yq eval '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null || echo "")
+        
+        if [[ -n "$site_names" ]]; then
+            while IFS= read -r site_name; do
+                if [[ -n "$site_name" && "$site_name" != "null" ]]; then
+                    obtain_site_ssl "$site_name" "$email" "$staging_flag"
+                    ((sites_processed++))
+                fi
+            done <<< "$site_names"
+        fi
     else
-        grep -A 50 "^sites:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r site_name; do
-            [[ -n "$site_name" ]] && obtain_site_ssl "$site_name" "$email" "$staging_flag"
-        done
+        local site_names
+        site_names=$(awk '/^sites:/,/^[a-zA-Z_]/ {
+            if (/^\s*-\s*name:/) {
+                gsub(/^\s*-\s*name:\s*["'"'"']?/, "")
+                gsub(/["'"'"'].*$/, "")
+                if (length($0) > 0) print $0
+            }
+        }' "$CONFIG_FILE")
+        
+        if [[ -n "$site_names" ]]; then
+            while IFS= read -r site_name; do
+                if [[ -n "$site_name" ]]; then
+                    obtain_site_ssl "$site_name" "$email" "$staging_flag"
+                    ((sites_processed++))
+                fi
+            done <<< "$site_names"
+        fi
+    fi
+
+    if [[ $sites_processed -eq 0 ]]; then
+        log_warning "No sites processed for SSL certificates"
+    else
+        log_success "Processed SSL certificates for $sites_processed site(s)"
     fi
 }
 
@@ -318,12 +493,13 @@ obtain_site_ssl() {
     # Get server names for the site
     local server_names
     if command -v yq &> /dev/null; then
-        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names[]" "$CONFIG_FILE" | tr '\n' ' ')
+        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null || echo "")
     else
         server_names=$(extract_site_config "$site_name" "server_names")
     fi
 
-    server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
+    # Clean up server names
+    server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ' | sed 's/^ *//; s/ *$//')
 
     if [[ -z "$server_names" ]]; then
         log_error "No server names found for site $site_name"
@@ -333,8 +509,15 @@ obtain_site_ssl() {
     # Build domain arguments for certbot
     local domain_args=""
     for domain in $server_names; do
-        domain_args+=" -d $domain"
+        if [[ -n "$domain" ]]; then
+            domain_args+=" -d $domain"
+        fi
     done
+
+    if [[ -z "$domain_args" ]]; then
+        log_error "No valid domains found for site $site_name"
+        return 1
+    fi
 
     log "Requesting certificate for domains: $server_names"
 
@@ -354,6 +537,7 @@ obtain_site_ssl() {
             --email "$email" \
             --agree-tos \
             --no-eff-email \
+            --non-interactive \
             $staging_flag \
             --dry-run \
             $domain_args; then
@@ -369,6 +553,7 @@ obtain_site_ssl() {
             --agree-tos \
             --no-eff-email \
             --redirect \
+            --non-interactive \
             $staging_flag \
             $domain_args; then
             log_success "SSL certificate obtained and configured for $site_name"
@@ -376,11 +561,13 @@ obtain_site_ssl() {
             # Enable HTTPS redirect in the HTTP block
             enable_https_redirect "$site_name"
         else
-            log_error "Failed to obtain SSL certificate for $site_name"
+            log_warning "Failed to obtain SSL certificate for $site_name"
             log "Check that:"
             log "  - DNS records point to this VPS"
             log "  - Port 80 is accessible from the internet"
             log "  - No other web server is using port 80"
+            log "  - The domains are valid and accessible"
+            # Don't exit on SSL failure - continue with other sites
             return 1
         fi
     fi
@@ -389,7 +576,7 @@ obtain_site_ssl() {
 # Enable HTTPS redirect in HTTP server block after SSL is configured
 enable_https_redirect() {
     local site_name="$1"
-    local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}"
+    local vhost_file="/etc/nginx/sites-available/vps-proxy-hub-${site_name}.conf"
     
     if [[ -f "$vhost_file" ]]; then
         # Uncomment the redirect line if it's commented
@@ -399,11 +586,18 @@ enable_https_redirect() {
         if ! grep -q "return 301 https:" "$vhost_file"; then
             # Add redirect after the ACME location block in HTTP server
             sed -i '/location.*acme-challenge/,/}/ { 
-                /}/ a\\n  # Redirect to HTTPS\n  return 301 https://$host$request_uri;
+                /}/ a\\n    # Redirect to HTTPS\n    return 301 https://$host$request_uri;
             }' "$vhost_file"
         fi
         
         log "Enabled HTTPS redirect for $site_name"
+        
+        # Reload nginx to apply the changes
+        if nginx -t && systemctl reload nginx; then
+            log_success "Nginx reloaded with HTTPS redirect for $site_name"
+        else
+            log_warning "Failed to reload nginx after enabling HTTPS redirect"
+        fi
     fi
 }
 
