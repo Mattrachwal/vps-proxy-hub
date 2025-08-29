@@ -18,16 +18,28 @@ main() {
     ensure_directory "/var/www/html" "755"
 
     # Process each site in the configuration
-    process_sites
+    if ! process_sites; then
+        log_error "Failed to process sites"
+        return 1
+    fi
 
     # Test nginx configuration
-    test_nginx_config
+    if ! test_nginx_config; then
+        log_error "Nginx configuration test failed, aborting"
+        return 1
+    fi
 
     # Reload nginx to apply sites
-    reload_nginx
+    if ! reload_nginx; then
+        log_error "Failed to reload nginx, aborting"
+        return 1
+    fi
 
     # Obtain SSL certificates and enable HTTPS
-    obtain_ssl_certificates
+    if ! obtain_ssl_certificates; then
+        log_warning "SSL certificate setup had issues, but basic setup is complete"
+        log "You can run certbot manually later: certbot --nginx"
+    fi
 
     log_success "Nginx virtual hosts configuration completed"
 }
@@ -441,24 +453,31 @@ EOF
 # Test nginx configuration
 test_nginx_config() {
     log "Testing Nginx configuration..."
-    if nginx -t; then
+    if nginx -t 2>&1; then
         log_success "Nginx configuration test passed"
+        return 0
     else
         log_error "Nginx configuration test failed"
+        log "Nginx configuration errors:"
+        nginx -t 2>&1 | sed 's/^/  /'
         log "Check the configuration files in /etc/nginx/sites-available/"
-        exit 1
+        return 1
     fi
 }
 
 # Reload nginx
 reload_nginx() {
     log "Reloading Nginx configuration..."
-    if systemctl reload nginx; then
+    if systemctl reload nginx 2>&1; then
         log_success "Nginx reloaded successfully"
+        return 0
     else
+        local status_output
+        status_output=$(systemctl status nginx --no-pager -l 2>&1 || true)
         log_error "Failed to reload Nginx"
-        log "Check nginx status: systemctl status nginx"
-        exit 1
+        log "Nginx service status:"
+        echo "$status_output" | sed 's/^/  /'
+        return 1
     fi
 }
 
@@ -479,10 +498,19 @@ obtain_ssl_certificates() {
     if [[ -z "$email" || "$email" == "null" ]]; then
         log_error "TLS email not configured in config.yaml"
         log "SSL certificates will need to be obtained manually"
+        log "Run: certbot --nginx --email your@email.com"
+        return 1
+    fi
+
+    # Check if certbot is available
+    if ! command -v certbot &> /dev/null; then
+        log_error "Certbot is not installed"
+        log "SSL certificates cannot be obtained automatically"
         return 1
     fi
 
     local sites_processed=0
+    local sites_failed=0
 
     # Process each site for SSL
     if command -v yq &> /dev/null; then
@@ -492,8 +520,11 @@ obtain_ssl_certificates() {
         if [[ -n "$site_names" ]]; then
             while IFS= read -r site_name; do
                 if [[ -n "$site_name" && "$site_name" != "null" ]]; then
-                    obtain_site_ssl "$site_name" "$email" "$staging_flag"
-                    ((sites_processed++))
+                    if obtain_site_ssl "$site_name" "$email" "$staging_flag"; then
+                        ((sites_processed++))
+                    else
+                        ((sites_failed++))
+                    fi
                 fi
             done <<< "$site_names"
         fi
@@ -510,17 +541,32 @@ obtain_ssl_certificates() {
         if [[ -n "$site_names" ]]; then
             while IFS= read -r site_name; do
                 if [[ -n "$site_name" ]]; then
-                    obtain_site_ssl "$site_name" "$email" "$staging_flag"
-                    ((sites_processed++))
+                    if obtain_site_ssl "$site_name" "$email" "$staging_flag"; then
+                        ((sites_processed++))
+                    else
+                        ((sites_failed++))
+                    fi
                 fi
             done <<< "$site_names"
         fi
     fi
 
-    if [[ $sites_processed -eq 0 ]]; then
-        log_warning "No sites processed for SSL certificates"
+    if [[ $sites_processed -eq 0 && $sites_failed -gt 0 ]]; then
+        log_error "Failed to obtain SSL certificates for all sites"
+        log "Common issues:"
+        log "  - DNS records don't point to this VPS"
+        log "  - Domains are not accessible from the internet"
+        log "  - Port 80 is blocked by firewall"
+        log "  - Another web server is using port 80"
+        log ""
+        log "To debug: curl -I http://yourdomain.com/.well-known/acme-challenge/test"
+        return 1
+    elif [[ $sites_failed -gt 0 ]]; then
+        log_warning "SSL certificates obtained for $sites_processed site(s), failed for $sites_failed site(s)"
+        return 0
     else
-        log_success "Processed SSL certificates for $sites_processed site(s)"
+        log_success "SSL certificates processed for $sites_processed site(s)"
+        return 0
     fi
 }
 
@@ -548,9 +594,13 @@ obtain_site_ssl() {
 
     # Build domain arguments for certbot
     local domain_args=""
+    local first_domain=""
     for domain in $server_names; do
         if [[ -n "$domain" ]]; then
             domain_args+=" -d $domain"
+            if [[ -z "$first_domain" ]]; then
+                first_domain="$domain"
+            fi
         fi
     done
 
@@ -570,9 +620,19 @@ obtain_site_ssl() {
         log "Performing certbot dry run (test mode)"
     fi
 
+    # Test domain accessibility before running certbot
+    log "Testing domain accessibility..."
+    for domain in $server_names; do
+        local test_url="http://$domain/.well-known/acme-challenge/test"
+        if ! curl -s -f -I "$test_url" >/dev/null 2>&1; then
+            log_warning "Domain $domain may not be accessible (this is normal if no challenge exists yet)"
+        fi
+    done
+
     # Run certbot to obtain certificate and configure nginx
     if [[ -n "$dry_run_flag" ]]; then
         # Dry run - just test certificate issuance
+        log "Running certbot dry run..."
         if certbot certonly --nginx \
             --email "$email" \
             --agree-tos \
@@ -580,34 +640,43 @@ obtain_site_ssl() {
             --non-interactive \
             $staging_flag \
             --dry-run \
-            $domain_args; then
+            $domain_args 2>&1; then
             log_success "SSL certificate dry run completed for $site_name"
+            return 0
         else
             log_error "Failed certbot dry run for $site_name"
             return 1
         fi
     else
         # Real certificate issuance and nginx configuration
-        if certbot --nginx \
+        log "Running certbot for real certificate..."
+        local certbot_output
+        if certbot_output=$(certbot --nginx \
             --email "$email" \
             --agree-tos \
             --no-eff-email \
             --redirect \
             --non-interactive \
             $staging_flag \
-            $domain_args; then
+            $domain_args 2>&1); then
             log_success "SSL certificate obtained and configured for $site_name"
             
             # Enable HTTPS redirect in the HTTP block
             enable_https_redirect "$site_name"
+            return 0
         else
-            log_warning "Failed to obtain SSL certificate for $site_name"
-            log "Check that:"
-            log "  - DNS records point to this VPS"
-            log "  - Port 80 is accessible from the internet"
-            log "  - No other web server is using port 80"
-            log "  - The domains are valid and accessible"
-            # Don't exit on SSL failure - continue with other sites
+            log_error "Failed to obtain SSL certificate for $site_name"
+            log "Certbot output:"
+            echo "$certbot_output" | sed 's/^/  /'
+            log ""
+            log "Common issues:"
+            log "  - DNS records for $server_names don't point to this VPS"
+            log "  - Port 80 is not accessible from the internet"
+            log "  - Another web server is using port 80"
+            log "  - Domain validation failed"
+            log ""
+            log "To debug manually:"
+            log "  curl -I http://$first_domain/.well-known/acme-challenge/"
             return 1
         fi
     fi
