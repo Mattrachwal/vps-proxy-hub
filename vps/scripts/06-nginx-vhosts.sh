@@ -1,5 +1,5 @@
 #!/bin/bash
-# VPS Setup - Nginx Virtual Hosts Configuration (FIXED)
+# VPS Setup - Nginx Virtual Hosts Configuration (FIXED VERSION)
 # Generates Nginx virtual hosts from config.yaml with proper HTTP+HTTPS setup
 
 set -euo pipefail
@@ -143,8 +143,6 @@ determine_upstream_config() {
 
     if [[ "$is_docker" == "true" ]]; then
         if [[ -n "$container_name" && -n "$container_port" ]]; then
-            # For Docker containers, we still proxy to the peer IP but use the container port
-            # The peer machine should handle container networking internally
             echo "${peer_ip}|${container_port}"
         else
             log_error "Docker upstream specified but container_name or container_port missing for $site_name"
@@ -172,7 +170,7 @@ extract_upstream_config() {
     " "$CONFIG_FILE"
 }
 
-# Generate virtual host configuration - FIXED VERSION
+# Generate virtual host configuration - ALWAYS use direct generation (no templates)
 generate_vhost() {
     local site_name="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
@@ -181,19 +179,16 @@ generate_vhost() {
     # Clean up server names (remove quotes, brackets, commas)
     server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ')
 
-    # Always generate configuration directly (ignore template with undefined placeholders)
+    # Generate configuration directly (no template dependencies)
     generate_vhost_direct "$vhost_file" "$server_names" "$upstream_host" "$upstream_port"
 
     # Enable the site (symlink to sites-enabled)
     ln -sf "$vhost_file" "/etc/nginx/sites-enabled/vps-proxy-hub-${site_name}"
 
-    # Ensure only one site uses default_server (remove if present)
-    rm -f /etc/nginx/sites-enabled/default
-
     log "Created and enabled virtual host: $vhost_file"
 }
 
-# Generate vhost file directly - FIXED VERSION
+# Generate vhost file directly without any template dependencies
 generate_vhost_direct() {
     local vhost_file="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
