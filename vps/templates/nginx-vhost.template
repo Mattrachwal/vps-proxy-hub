@@ -1,4 +1,4 @@
-# HTTP: ACME + redirect to HTTPS
+# HTTP: ACME challenges and initial setup
 server {
   listen 80;
   listen [::]:80;
@@ -10,30 +10,14 @@ server {
     try_files $uri =404;
   }
 
-  # Redirect to HTTPS (will be uncommented after SSL setup)
-  # return 301 https://$host$request_uri;
-}
-
-# HTTPS: proxy to WireGuard peer
-server {
-  listen 443 ssl http2;
-  listen [::]:443 ssl http2;
-  server_name {{SERVER_NAMES}};
-
-  # SSL configuration will be managed by Certbot
-  # ssl_certificate     /etc/letsencrypt/live/DOMAIN/fullchain.pem;
-  # ssl_certificate_key /etc/letsencrypt/live/DOMAIN/privkey.pem;
-  # include /etc/letsencrypt/options-ssl-nginx.conf;
-  # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
-  # Debug header to confirm upstream
-  add_header X-Proxy-Upstream "{{UPSTREAM_HOST}}:{{UPSTREAM_PORT}}" always;
-
-  # Reverse proxy over WireGuard
+  # Proxy to upstream (will be replaced with redirect after SSL setup)
   location / {
     proxy_pass http://{{UPSTREAM_HOST}}:{{UPSTREAM_PORT}};
     include /etc/nginx/conf.d/proxy.conf;
     proxy_next_upstream error timeout http_502 http_503 http_504;
+    
+    # Debug header to confirm upstream
+    add_header X-Proxy-Upstream "{{UPSTREAM_HOST}}:{{UPSTREAM_PORT}}" always;
   }
 
   # Optional health check

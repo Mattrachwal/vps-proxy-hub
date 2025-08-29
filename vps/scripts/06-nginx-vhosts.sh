@@ -373,23 +373,10 @@ generate_vhost_from_template() {
     local template_content
     template_content=$(cat "$template_path")
 
-    # Define the HTTP body (initially empty, will be filled after SSL setup)
-    local http_body="  # Redirect to HTTPS (will be enabled after SSL setup)
-  # return 301 https://\$host\$request_uri;"
-
-    # Define the SSL block (placeholder for certbot)
-    local ssl_block="  # SSL configuration will be managed by Certbot
-  # ssl_certificate     /etc/letsencrypt/live/DOMAIN/fullchain.pem;
-  # ssl_certificate_key /etc/letsencrypt/live/DOMAIN/privkey.pem;
-  # include /etc/letsencrypt/options-ssl-nginx.conf;
-  # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;"
-
     # Perform substitutions
     template_content="${template_content//\{\{SERVER_NAMES\}\}/$server_names}"
     template_content="${template_content//\{\{UPSTREAM_HOST\}\}/$upstream_host}"
     template_content="${template_content//\{\{UPSTREAM_PORT\}\}/$upstream_port}"
-    template_content="${template_content//\{\{HTTP_BODY\}\}/$http_body}"
-    template_content="${template_content//\{\{SSL_BLOCK\}\}/$ssl_block}"
 
     # Write the final configuration
     echo "$template_content" > "$vhost_file"
@@ -402,7 +389,7 @@ generate_vhost_direct() {
     local vhost_file="$1" server_names="$2" upstream_host="$3" upstream_port="$4"
 
     cat > "$vhost_file" << EOF
-# HTTP: ACME + redirect to HTTPS
+# HTTP: ACME challenges and initial setup
 server {
     listen 80;
     listen [::]:80;
@@ -414,30 +401,14 @@ server {
         try_files \$uri =404;
     }
 
-    # Redirect to HTTPS (will be uncommented after SSL setup)
-    # return 301 https://\$host\$request_uri;
-}
-
-# HTTPS: proxy to WireGuard peer
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $server_names;
-
-    # SSL configuration will be managed by Certbot
-    # ssl_certificate     /etc/letsencrypt/live/DOMAIN/fullchain.pem;
-    # ssl_certificate_key /etc/letsencrypt/live/DOMAIN/privkey.pem;
-    # include /etc/letsencrypt/options-ssl-nginx.conf;
-    # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
-    # Debug header to confirm upstream
-    add_header X-Proxy-Upstream "${upstream_host}:${upstream_port}" always;
-
-    # Reverse proxy over WireGuard
+    # Proxy to upstream (will be replaced with redirect after SSL setup)
     location / {
         proxy_pass http://${upstream_host}:${upstream_port};
         include /etc/nginx/conf.d/proxy.conf;
         proxy_next_upstream error timeout http_502 http_503 http_504;
+        
+        # Debug header to confirm upstream
+        add_header X-Proxy-Upstream "${upstream_host}:${upstream_port}" always;
     }
 
     # Optional health check
