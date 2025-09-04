@@ -214,7 +214,7 @@ show_completion_info() {
     echo "1. Set up home machines:"
     echo "   - Copy this repository to each home machine"
     echo "   - Run: sudo ./home/setup.sh <peer-name>"
-    echo "   - Add the generated public key to VPS using: add-peer-key <peer-name> '<public-key>'"
+    echo "   - Add the generated public key to VPS using: ./toos/add-peer-key.sh <peer-name> '<public-key>'"
     echo ""
     
     echo "2. Verify WireGuard connections:"

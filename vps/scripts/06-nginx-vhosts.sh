@@ -461,101 +461,70 @@ obtain_ssl_certificates() {
     local use_staging
     use_staging=$(get_config_value "tls.use_staging" "false")
 
-    if [[ "$use_staging" == "true" ]]; then
-        staging_flag="--staging"
-        log_warning "Using Let's Encrypt staging environment (test certificates)"
-    fi
-
     if [[ -z "$email" || "$email" == "null" ]]; then
         log_error "TLS email not configured in config.yaml"
-        log "SSL certificates will need to be obtained manually"
-        log "Run: certbot --nginx --email your@email.com"
+        log "Run manually when ready: certbot --nginx -d example.com -d www.example.com"
         return 1
     fi
 
-    # Check if certbot is available
-    if ! command -v certbot &> /dev/null; then
-        log_error "Certbot is not installed"
-        log "SSL certificates cannot be obtained automatically"
+    if ! command -v certbot >/dev/null 2>&1; then
+        log_error "Certbot is not installed or not in PATH"
+        log "Install per your distro or snap: https://certbot.eff.org"
         return 1
+    fi
+
+    if [[ "$use_staging" == "true" ]]; then
+        staging_flag="--staging"
+        log_warning "Using Let's Encrypt staging server (test certificates)"
     fi
 
     local sites_processed=0
     local sites_failed=0
 
-    # Process each site for SSL
-    if command -v yq &> /dev/null; then
-        local site_names
+    # Iterate sites by name
+    local site_names
+    if command -v yq >/dev/null 2>&1; then
         site_names=$(yq eval '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null || echo "")
-        
-        if [[ -n "$site_names" ]]; then
-            while IFS= read -r site_name; do
-                if [[ -n "$site_name" && "$site_name" != "null" ]]; then
-                    if obtain_site_ssl "$site_name" "$email" "$staging_flag"; then
-                        ((sites_processed++))
-                    else
-                        ((sites_failed++))
-                    fi
-                fi
-            done <<< "$site_names"
-        fi
     else
-        local site_names
-        site_names=$(awk '/^sites:/,/^[a-zA-Z_]/ {
-            if (/^\s*-\s*name:/) {
-                gsub(/^\s*-\s*name:\s*["'"'"']?/, "")
-                gsub(/["'"'"'].*$/, "")
-                if (length($0) > 0) print $0
-            }
-        }' "$CONFIG_FILE")
-        
-        if [[ -n "$site_names" ]]; then
-            while IFS= read -r site_name; do
-                if [[ -n "$site_name" ]]; then
-                    if obtain_site_ssl "$site_name" "$email" "$staging_flag"; then
-                        ((sites_processed++))
-                    else
-                        ((sites_failed++))
-                    fi
-                fi
-            done <<< "$site_names"
-        fi
+        site_names=$(awk '/^sites:/,/^[a-zA-Z_]/ { if (/^\s*-\s*name:/) { gsub(/^\s*-\s*name:\s*["'"'"']?/,""); gsub(/["'"'"'].*$/,""); if (length($0)>0) print $0 } }' "$CONFIG_FILE")
     fi
 
-    if [[ $sites_processed -eq 0 && $sites_failed -gt 0 ]]; then
-        log_error "Failed to obtain SSL certificates for all sites"
-        log "Common issues:"
-        log "  - DNS records don't point to this VPS"
-        log "  - Domains are not accessible from the internet"
-        log "  - Port 80 is blocked by firewall"
-        log "  - Another web server is using port 80"
-        log ""
-        log "To debug: curl -I http://yourdomain.com/.well-known/acme-challenge/test"
-        return 1
-    elif [[ $sites_failed -gt 0 ]]; then
-        log_warning "SSL certificates obtained for $sites_processed site(s), failed for $sites_failed site(s)"
-        return 0
-    else
-        log_success "SSL certificates processed for $sites_processed site(s)"
+    if [[ -z "$site_names" ]]; then
+        log_warning "No sites found to enable TLS for"
         return 0
     fi
+
+    while IFS= read -r site_name; do
+        [[ -z "$site_name" || "$site_name" == "null" ]] && continue
+        if obtain_site_ssl "$site_name" "$email" "$staging_flag"; then
+            ((sites_processed++))
+        else
+            ((sites_failed++))
+        fi
+    done <<< "$site_names"
+
+    if [[ $sites_failed -gt 0 ]]; then
+        log_warning "SSL processed for $sites_processed site(s), failed for $sites_failed site(s)"
+        return 0
+    fi
+
+    log_success "SSL certificates processed for $sites_processed site(s)"
+    return 0
 }
 
 # Obtain SSL certificate for individual site
 obtain_site_ssl() {
     local site_name="$1" email="$2" staging_flag="$3"
 
-    log "Obtaining SSL certificate for site: $site_name"
+    log "TLS: processing site: $site_name"
 
-    # Get server names for the site
+    # Collect domains for this site
     local server_names
-    if command -v yq &> /dev/null; then
+    if command -v yq >/dev/null 2>&1; then
         server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null || echo "")
     else
         server_names=$(extract_site_config "$site_name" "server_names")
     fi
-
-    # Clean up server names
     server_names=$(echo "$server_names" | sed 's/["\[\],]//g' | tr -s ' ' | sed 's/^ *//; s/ *$//')
 
     if [[ -z "$server_names" ]]; then
@@ -563,95 +532,82 @@ obtain_site_ssl() {
         return 1
     fi
 
-    # Build domain arguments for certbot
-    local domain_args=""
     local first_domain=""
-    for domain in $server_names; do
-        if [[ -n "$domain" ]]; then
-            domain_args+=" -d $domain"
-            if [[ -z "$first_domain" ]]; then
-                first_domain="$domain"
-            fi
-        fi
+    local domain_args=()
+    for d in $server_names; do
+        [[ -z "$first_domain" ]] && first_domain="$d"
+        domain_args+=("-d" "$d")
     done
 
-    if [[ -z "$domain_args" ]]; then
-        log_error "No valid domains found for site $site_name"
-        return 1
-    fi
+    log "Domains: $server_names"
 
-    log "Requesting certificate for domains: $server_names"
-
-    # Check for dry run mode
-    local dry_run_flag=""
+    # Optionally do a pre-flight dry run (then continue to real issuance)
     local dry_run_on_apply
     dry_run_on_apply=$(get_config_value "ops.certbot_dry_run_on_apply" "false")
     if [[ "$dry_run_on_apply" == "true" ]]; then
-        dry_run_flag="--dry-run"
-        log "Performing certbot dry run (test mode)"
+        log "Performing certbot dry run (pre-flight)"
+        if ! certbot certonly --nginx \
+            --email "$email" \
+            --agree-tos \
+            --no-eff-email \
+            --non-interactive \
+            --dry-run \
+            $staging_flag \
+            "${domain_args[@]}" 2>&1; then
+            log_error "Dry run failed for $site_name"
+            return 1
+        fi
+        log_success "Dry run OK for $site_name; proceeding with real issuance"
     fi
 
-    # Test domain accessibility before running certbot
-    log "Testing domain accessibility..."
-    for domain in $server_names; do
-        local test_url="http://$domain/.well-known/acme-challenge/test"
-        if ! curl -s -f -I "$test_url" >/dev/null 2>&1; then
-            log_warning "Domain $domain may not be accessible (this is normal if no challenge exists yet)"
-        fi
-    done
+    # Try normal obtain & install (non-interactive)
+    # This covers first-time issuance and also reconfiguration when due.
+    if certbot --nginx \
+        --email "$email" \
+        --agree-tos \
+        --no-eff-email \
+        --non-interactive \
+        --redirect \
+        $staging_flag \
+        "${domain_args[@]}" 2>&1; then
+        log_success "Certificate obtained/installed for $site_name"
+        nginx -t && systemctl reload nginx || log_warning "Nginx reload warning after install"
+        return 0
+    fi
 
-    # Run certbot to obtain certificate and configure nginx
-    if [[ -n "$dry_run_flag" ]]; then
-        # Dry run - just test certificate issuance
-        log "Running certbot dry run..."
-        if certbot certonly --nginx \
-            --email "$email" \
-            --agree-tos \
-            --no-eff-email \
-            --non-interactive \
-            $staging_flag \
-            --dry-run \
-            $domain_args 2>&1; then
-            log_success "SSL certificate dry run completed for $site_name"
-            return 0
-        else
-            log_error "Failed certbot dry run for $site_name"
-            return 1
-        fi
+    # If we get here, the common case is: "not yet due for renewal".
+    # Reinstall the existing certificate into nginx (non-interactive).
+    log "Attempting non-interactive reinstall of existing certificate for $first_domain"
+    if certbot install \
+        --nginx \
+        --cert-name "$first_domain" \
+        --non-interactive \
+        --redirect 2>&1; then
+        log_success "Reinstalled existing certificate into nginx for $site_name"
+        nginx -t && systemctl reload nginx || log_warning "Nginx reload warning after reinstall"
+        return 0
+    fi
+
+    # Last resort: force renewal (use sparingly; may hit CA rate limits)
+    log_warning "Reinstall failed; attempting a forced renewal for $site_name"
+    if certbot --nginx \
+        --email "$email" \
+        --agree-tos \
+        --no-eff-email \
+        --non-interactive \
+        --redirect \
+        --force-renewal \
+        $staging_flag \
+        "${domain_args[@]}" 2>&1; then
+        log_success "Forced renewal succeeded for $site_name"
+        nginx -t && systemctl reload nginx || log_warning "Nginx reload warning after forced renewal"
+        return 0
     else
-        # Real certificate issuance and nginx configuration
-        log "Running certbot for real certificate..."
-        local certbot_output
-        if certbot_output=$(certbot --nginx \
-            --email "$email" \
-            --agree-tos \
-            --no-eff-email \
-            --redirect \
-            --non-interactive \
-            $staging_flag \
-            $domain_args 2>&1); then
-            log_success "SSL certificate obtained and configured for $site_name"
-            
-            # Enable HTTPS redirect in the HTTP block
-            enable_https_redirect "$site_name"
-            return 0
-        else
-            log_error "Failed to obtain SSL certificate for $site_name"
-            log "Certbot output:"
-            echo "$certbot_output" | sed 's/^/  /'
-            log ""
-            log "Common issues:"
-            log "  - DNS records for $server_names don't point to this VPS"
-            log "  - Port 80 is not accessible from the internet"
-            log "  - Another web server is using port 80"
-            log "  - Domain validation failed"
-            log ""
-            log "To debug manually:"
-            log "  curl -I http://$first_domain/.well-known/acme-challenge/"
-            return 1
-        fi
+        log_error "Failed to obtain/reinstall certificate for $site_name"
+        return 1
     fi
 }
+
 
 # Enable HTTPS redirect in HTTP server block after SSL is configured
 enable_https_redirect() {
