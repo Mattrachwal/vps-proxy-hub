@@ -1,132 +1,137 @@
 #!/bin/bash
-# tools/add-peer-key.sh
-# Add a peer's public key and regenerate wg0.conf using ../config.yaml
+# Debug version of add-peer-key.sh with more verbose output
 
 set -euo pipefail
 
-# ---------- CLI ----------
 CONFIG_FILE_DEFAULT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../config.yaml"
 CONFIG_FILE="$CONFIG_FILE_DEFAULT"
 PEER_NAME=""
 PUBLIC_KEY=""
 
-usage() {
-  echo "Usage: $0 [-c|--config <path/to/config.yaml>] <peer-name> <public-key>"
-  echo "Example: sudo $0 dev-02 'LgvMuKX3vV3NGXurnIDclJUeaYw1zuG4dsuIkqYDghs='"
-  exit 1
-}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -c|--config) CONFIG_FILE="$2"; shift 2 ;;
-    -h|--help) usage ;;
-    *) 
-      if [[ -z "${PEER_NAME:-}" ]]; then PEER_NAME="$1"
-      elif [[ -z "${PUBLIC_KEY:-}" ]]; then PUBLIC_KEY="$1"
-      else usage; fi
-      shift
-      ;;
-  esac
-done
-
-[[ -n "${PEER_NAME:-}" && -n "${PUBLIC_KEY:-}" ]] || usage
-
-# ---------- Colors & logging ----------
+# Colors & logging
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-log()         { echo -e "${BLUE}[INFO]${NC} $*"; }
+log()         { echo -e "${BLUE}[DEBUG]${NC} $*"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
 log_warning() { echo -e "${YELLOW}[WARNING]${NC} $*"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 
-# ---------- Root check ----------
+# Parse arguments
+if [[ $# -ne 2 ]]; then
+    echo "Usage: $0 <peer-name> <public-key>"
+    exit 1
+fi
+
+PEER_NAME="$1"
+PUBLIC_KEY="$2"
+
+log "Starting debug session for peer: $PEER_NAME"
+log "Public key: $PUBLIC_KEY"
+log "Config file: $CONFIG_FILE"
+
+# Check if running as root
 if [[ $EUID -ne 0 ]]; then
-  log_error "This script must be run as root (use sudo)."
-  exit 1
+    log_error "This script must be run as root (use sudo)."
+    exit 1
 fi
 
-# ---------- Config checks ----------
+# Check config file exists
 if [[ ! -f "$CONFIG_FILE" ]]; then
-  log_error "Config file not found at: $CONFIG_FILE"
-  exit 1
+    log_error "Config file not found at: $CONFIG_FILE"
+    exit 1
 fi
 
-# ---------- Helpers ----------
+log "Config file exists: $CONFIG_FILE"
+
+# Check yq availability
 have_yq=false
-if command -v yq >/dev/null 2>&1; then have_yq=true; fi
+if command -v yq >/dev/null 2>&1; then 
+    have_yq=true
+    log "yq is available: $(yq --version)"
+else
+    log_warning "yq is not available, using fallback parsing"
+fi
 
+# Helper function to get config values
 cfg_get() {
-  local jqpath="$1" default="${2:-}"
-  if $have_yq; then
-    local val
-    # yq returns "null" for missing, normalize to empty
-    val="$(yq eval "$jqpath // \"\"" "$CONFIG_FILE" 2>/dev/null || echo "")"
-    [[ -n "$val" ]] && echo "$val" || echo "$default"
-  else
-    # very light fallback parsing; best effort for your known keys
-    local key="${jqpath##*.}"
-    local line
-    line="$(grep -E "^[[:space:]]*$key:" "$CONFIG_FILE" | head -1 || true)"
-    if [[ -n "$line" ]]; then
-      echo "$line" | sed 's/.*:[[:space:]]*//' | sed 's/^"//' | sed 's/"$//' | tr -d "'" 
+    local jqpath="$1" default="${2:-}"
+    if $have_yq; then
+        local val
+        val="$(yq eval "$jqpath // \"\"" "$CONFIG_FILE" 2>/dev/null || echo "")"
+        [[ -n "$val" && "$val" != "null" ]] && echo "$val" || echo "$default"
     else
-      echo "$default"
+        local key="${jqpath##*.}"
+        local line
+        line="$(grep -E "^[[:space:]]*$key:" "$CONFIG_FILE" | head -1 || true)"
+        if [[ -n "$line" ]]; then
+            echo "$line" | sed 's/.*:[[:space:]]*//' | sed 's/^"//' | sed 's/"$//' | tr -d "'" 
+        else
+            echo "$default"
+        fi
     fi
-  fi
 }
 
-# Peer-specific read: address & keepalive by name
-peer_field_by_name() {
-  local name="$1" field="$2"
-  if $have_yq; then
-    yq eval ".peers[] | select(.name == \"$name\") | .$field // \"\"" "$CONFIG_FILE" 2>/dev/null || echo ""
-  else
-    # Fallback awk to scan the peer block
-    awk -v n="$name" -v f="$field" '
-      $0 ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
-        inblk=0
-        if(index($0,n)>0) { inblk=1 }
-      }
-      inblk && $0 ~ f":" {
-        gsub(/.*: */,"",$0); gsub(/^"|"$/,"",$0); gsub(/'"'"'/,"",$0); print; exit
-      }
-    ' "$CONFIG_FILE"
-  fi
-}
+# Check peer configuration
+log "Checking peer configuration in config.yaml..."
+if $have_yq; then
+    peer_exists=$(yq eval ".peers[] | select(.name == \"$PEER_NAME\") | .name" "$CONFIG_FILE" 2>/dev/null || echo "")
+    if [[ -n "$peer_exists" ]]; then
+        log_success "Peer $PEER_NAME found in configuration"
+        peer_addr=$(yq eval ".peers[] | select(.name == \"$PEER_NAME\") | .address" "$CONFIG_FILE" 2>/dev/null || echo "")
+        peer_keepalive=$(yq eval ".peers[] | select(.name == \"$PEER_NAME\") | .keepalive" "$CONFIG_FILE" 2>/dev/null || echo "25")
+        log "Peer address: $peer_addr"
+        log "Peer keepalive: $peer_keepalive"
+    else
+        log_error "Peer $PEER_NAME not found in configuration"
+        exit 1
+    fi
+else
+    log_warning "Cannot verify peer configuration without yq"
+fi
 
-# ---------- Paths & values ----------
+# Get paths
 PEERS_DIR="$(cfg_get '.vps.wireguard.peers_dir' '/etc/wireguard/peers')"
 VPS_PRIVATE_KEY_PATH="$(cfg_get '.vps.wireguard.private_key_path' '/etc/wireguard/vps-private.key')"
 VPS_ADDRESS="$(cfg_get '.vps.wireguard.vps_address' '10.8.0.1/24')"
 LISTEN_PORT="$(cfg_get '.vps.wireguard.listen_port' '51820')"
 
+log "Peers directory: $PEERS_DIR"
+log "VPS private key path: $VPS_PRIVATE_KEY_PATH"
+log "VPS address: $VPS_ADDRESS"
+log "Listen port: $LISTEN_PORT"
+
+# Create peers directory
 mkdir -p "$PEERS_DIR"
 chmod 700 "$PEERS_DIR"
+log "Created/verified peers directory: $PEERS_DIR"
 
-# ---------- Save the provided public key ----------
+# Save public key
 echo "$PUBLIC_KEY" > "$PEERS_DIR/${PEER_NAME}.pub"
 chmod 600 "$PEERS_DIR/${PEER_NAME}.pub"
-log_success "Added public key for peer: $PEER_NAME → $PEERS_DIR/${PEER_NAME}.pub"
+log_success "Saved public key: $PEERS_DIR/${PEER_NAME}.pub"
 
-# ---------- Validate VPS private key ----------
+# Check VPS private key
 if [[ ! -f "$VPS_PRIVATE_KEY_PATH" ]]; then
-  log_error "VPS private key not found: $VPS_PRIVATE_KEY_PATH"
-  echo "Generate with:"
-  echo "  sudo sh -c 'wg genkey | tee $VPS_PRIVATE_KEY_PATH | wg pubkey > /etc/wireguard/vps-public.key'"
-  exit 1
+    log_error "VPS private key not found: $VPS_PRIVATE_KEY_PATH"
+    echo "Generate with:"
+    echo "  sudo sh -c 'wg genkey | tee $VPS_PRIVATE_KEY_PATH | wg pubkey > /etc/wireguard/vps-public.key'"
+    exit 1
 fi
-VPS_PRIVATE_KEY="$(cat "$VPS_PRIVATE_KEY_PATH")"
 
-# ---------- Build wg0.conf ----------
+VPS_PRIVATE_KEY="$(cat "$VPS_PRIVATE_KEY_PATH")"
+log "VPS private key loaded (length: ${#VPS_PRIVATE_KEY} chars)"
+
+# Build wg0.conf
 WG_CONF="/etc/wireguard/wg0.conf"
+log "Building WireGuard configuration: $WG_CONF"
 
 if [[ -f "$WG_CONF" ]]; then
-  cp "$WG_CONF" "/etc/wireguard/wg0.conf.backup.$(date +%Y%m%d_%H%M%S)"
-  log "Backed up existing wg0.conf"
+    cp "$WG_CONF" "/etc/wireguard/wg0.conf.backup.$(date +%Y%m%d_%H%M%S)"
+    log "Backed up existing wg0.conf"
 fi
 
 cat > "$WG_CONF" <<EOF
 # VPS WireGuard Configuration
-# Generated by tools/add-peer-key.sh
+# Generated by debug script
 
 [Interface]
 PrivateKey = $VPS_PRIVATE_KEY
@@ -140,22 +145,47 @@ PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACC
 
 EOF
 
+log "Base configuration written"
+
+# Add all peers
 PEERS_ADDED=0
 shopt -s nullglob
 for keyfile in "$PEERS_DIR"/*.pub; do
-  PK="$(cat "$keyfile")"
-  NAME="$(basename "$keyfile" .pub)"
-
-  ADDR="$(peer_field_by_name "$NAME" "address")"
-  KA="$(peer_field_by_name "$NAME" "keepalive")"
-  [[ -z "$KA" ]] && KA="$(cfg_get '.defaults.wireguard.keepalive' '25')"
-
-  if [[ -z "$ADDR" ]]; then
-    log_warning "Skipping peer $NAME: address not found in config.yaml"
-    continue
-  fi
-
-  cat >> "$WG_CONF" <<EOF
+    [[ -f "$keyfile" ]] || continue
+    
+    PK="$(cat "$keyfile")"
+    NAME="$(basename "$keyfile" .pub)"
+    
+    log "Processing peer: $NAME"
+    
+    # Get peer configuration
+    ADDR=""
+    KA="25"
+    
+    if $have_yq; then
+        ADDR=$(yq eval ".peers[] | select(.name == \"$NAME\") | .address" "$CONFIG_FILE" 2>/dev/null || echo "")
+        KA=$(yq eval ".peers[] | select(.name == \"$NAME\") | .keepalive" "$CONFIG_FILE" 2>/dev/null || echo "25")
+    else
+        # Fallback parsing
+        ADDR=$(awk -v n="$NAME" '
+            $0 ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
+                inblk=0
+                if(index($0,n)>0) { inblk=1 }
+            }
+            inblk && $0 ~ /address:/ {
+                gsub(/.*: */,"",$0); gsub(/^"|"$/,"",$0); gsub(/'"'"'/,"",$0); print; exit
+            }
+        ' "$CONFIG_FILE")
+    fi
+    
+    if [[ -z "$ADDR" || "$ADDR" == "null" ]]; then
+        log_warning "Skipping peer $NAME: address not found in config.yaml"
+        continue
+    fi
+    
+    [[ -z "$KA" || "$KA" == "null" ]] && KA="25"
+    
+    cat >> "$WG_CONF" <<EOF
 
 # Peer: $NAME
 [Peer]
@@ -164,32 +194,61 @@ AllowedIPs          = $ADDR
 PersistentKeepalive = $KA
 
 EOF
-  ((PEERS_ADDED++))
-  log_success "Staged peer: $NAME ($ADDR)"
+    ((PEERS_ADDED++))
+    log_success "Added peer: $NAME ($ADDR)"
 done
 shopt -u nullglob
 
 chmod 600 "$WG_CONF"
+log "Set permissions on $WG_CONF"
 
 if (( PEERS_ADDED == 0 )); then
-  log_warning "No peers staged in $PEERS_DIR; wg0.conf has only [Interface]."
+    log_warning "No peers added to configuration!"
+else
+    log_success "Added $PEERS_ADDED peer(s) to configuration"
 fi
 
-# ---------- Restart service ----------
-log "Restarting WireGuard…"
-if systemctl is-active --quiet wg-quick@wg0; then
-  systemctl restart wg-quick@wg0
+# Test configuration
+log "Testing WireGuard configuration..."
+if wg-quick strip wg0 >/dev/null 2>&1; then
+    log_success "Configuration syntax is valid"
 else
-  systemctl start wg-quick@wg0
+    log_error "Configuration syntax error!"
+    exit 1
 fi
-sleep 1
 
+# Restart WireGuard service
+log "Restarting WireGuard service..."
+
+# Stop the service first to ensure clean restart
 if systemctl is-active --quiet wg-quick@wg0; then
-  log_success "WireGuard service is active."
-  echo
-  log "Current status:"
-  wg show wg0 || log_warning "wg show failed"
-else
-  log_error "WireGuard failed to start. Check: journalctl -u wg-quick@wg0"
-  exit 1
+    log "Stopping WireGuard service..."
+    systemctl stop wg-quick@wg0
+    sleep 1
 fi
+
+# Start the service
+log "Starting WireGuard service..."
+systemctl start wg-quick@wg0
+sleep 3
+
+# Verify the service is running
+if systemctl is-active --quiet wg-quick@wg0; then
+    log_success "WireGuard service is active"
+    
+    # Wait a moment for the interface to be fully ready
+    sleep 2
+    
+    echo
+    log "Current WireGuard status:"
+    if wg show wg0; then
+        log_success "WireGuard interface is working correctly"
+    else
+        log_warning "wg show failed - interface may not be ready yet"
+    fi
+else
+    log_error "WireGuard failed to start. Check: journalctl -u wg-quick@wg0"
+    exit 1
+fi
+
+log_success "Peer $PEER_NAME added successfully!"
