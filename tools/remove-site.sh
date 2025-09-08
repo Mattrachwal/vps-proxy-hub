@@ -232,8 +232,9 @@ remove_ssl_certificates() {
 remove_nginx_config() {
     log "Removing Nginx configuration for site: $SITE_NAME"
     
-    local vhost_available="/etc/nginx/sites-available/vps-proxy-hub-${SITE_NAME}"
-    local vhost_enabled="/etc/nginx/sites-enabled/vps-proxy-hub-${SITE_NAME}"
+    # Match the actual file naming pattern used by 06-nginx-vhosts.sh
+    local vhost_available="/etc/nginx/sites-available/vps-proxy-hub-${SITE_NAME}.conf"
+    local vhost_enabled="/etc/nginx/sites-enabled/vps-proxy-hub-${SITE_NAME}.conf"
     
     # Remove symbolic link
     if [[ -L "$vhost_enabled" ]]; then

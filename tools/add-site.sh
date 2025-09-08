@@ -390,7 +390,7 @@ add_site_to_config() {
     log_success "Site '$SITE_NAME' added to configuration"
 }
 
-# Update VPS services
+# Update VPS services by regenerating nginx virtual hosts
 update_vps_services() {
     log "Updating VPS services..."
     
@@ -401,8 +401,14 @@ update_vps_services() {
         log "Regenerating Nginx virtual hosts..."
         
         if [[ -x "$vps_scripts_dir/06-nginx-vhosts.sh" ]]; then
-            "$vps_scripts_dir/06-nginx-vhosts.sh"
-            log_success "Nginx virtual hosts updated"
+            # Export CONFIG_FILE for the script
+            export CONFIG_FILE
+            if "$vps_scripts_dir/06-nginx-vhosts.sh"; then
+                log_success "Nginx virtual hosts updated"
+            else
+                log_error "Failed to update Nginx virtual hosts"
+                return 1
+            fi
         else
             log_warning "VPS nginx vhosts script not executable: $vps_scripts_dir/06-nginx-vhosts.sh"
         fi
