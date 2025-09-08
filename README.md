@@ -1,17 +1,17 @@
 # VPS Proxy Hub
 
-A complete, scriptable solution for setting up a homelab edge gateway using a VPS as the front door, with WireGuard tunnels connecting to one or more home machines. The VPS terminates TLS (Let's Encrypt), runs Nginx as a reverse proxy, and forwards traffic through encrypted WireGuard tunnels to services running on your home machines.
+A complete, modular solution for setting up a homelab edge gateway using a VPS as the front door, with WireGuard tunnels connecting to one or more home machines. The VPS terminates TLS (Let's Encrypt), runs Nginx as a reverse proxy, and forwards traffic through encrypted WireGuard tunnels to services running on your home machines.
 
 ## 🌟 Features
 
-- **Secure Edge Gateway**: VPS acts as a public front door with TLS termination
-- **Encrypted Tunnels**: WireGuard VPN connects VPS to home machines
-- **Automatic SSL**: Let's Encrypt certificates with auto-renewal
-- **Config-Driven**: Single YAML file controls entire setup
-- **Modular Scripts**: Small, focused scripts for each setup step  
-- **Docker Support**: Proxy to Docker containers with internal DNS
-- **Multi-Peer**: Scale to multiple home machines and sites
-- **Management Tools**: Add/remove sites, check status, monitor health
+- **🔒 Secure Edge Gateway**: VPS acts as a public front door with TLS termination and firewall protection
+- **🔐 Encrypted Tunnels**: WireGuard VPN connects VPS to home machines with modern cryptography
+- **🏆 Automatic SSL**: Let's Encrypt certificates with auto-renewal and multiple fallback strategies
+- **⚙️ Config-Driven**: Single YAML file controls entire infrastructure setup
+- **🧩 Modular Architecture**: Clean, maintainable codebase with shared utility libraries
+- **🐳 Docker Support**: Seamless proxy to Docker containers with internal DNS resolution
+- **📈 Multi-Peer Scalable**: Support for multiple home machines and unlimited sites
+- **🛠️ Management Tools**: Rich toolset for adding/removing sites, monitoring health, and troubleshooting
 
 ## 🏗️ Architecture
 
@@ -20,281 +20,340 @@ Internet ──→ VPS (Public IP) ──→ WireGuard Tunnel ──→ Home Mac
              │                                       │
              ├─ Nginx Reverse Proxy                  ├─ Service on Port 8080
              ├─ Let's Encrypt SSL                    ├─ Docker Container
-             └─ UFW Firewall                         └─ Multiple Services
+             ├─ UFW Firewall                         ├─ Multiple Services
+             └─ Automated Management                 └─ Health Monitoring
 ```
 
 **Traffic Flow:**
 1. Client connects to `https://your-site.com` 
 2. DNS points to VPS public IP
-3. Nginx on VPS terminates SSL and proxies over WireGuard tunnel
-4. Home machine receives request and responds
-5. Response travels back through tunnel to client
+3. UFW firewall allows only necessary ports (22, 80, 443, WireGuard)
+4. Nginx terminates SSL and proxies over encrypted WireGuard tunnel
+5. Home machine receives request and responds through secure tunnel
+6. Response travels back through tunnel to client with full encryption
 
 ## 📁 Repository Structure
 
 ```
 vps-proxy-hub/
-├── README.md                    # This file
-├── config.yaml.example         # Configuration template
-├── vps/                         # VPS setup scripts
-│   ├── setup.sh                # VPS orchestrator script  
-│   ├── scripts/                # Individual setup scripts
-│   │   ├── 01-system-update.sh
-│   │   ├── 02-ufw-setup.sh
-│   │   ├── 03-wireguard-install.sh
-│   │   ├── 04-wireguard-config.sh
-│   │   ├── 05-nginx-install.sh
-│   │   ├── 06-nginx-vhosts.sh
-│   │   └── utils.sh            # Shared utilities
-│   └── templates/              # Configuration templates
-│       ├── wg0.conf.template
-│       └── nginx-vhost.template
-├── home/                       # Home machine setup scripts
-│   ├── setup.sh               # Home orchestrator script
-│   ├── scripts/               # Individual setup scripts  
-│   │   ├── 01-wireguard-install.sh
-│   │   ├── 02-wireguard-config.sh
-│   │   ├── 03-routing-setup.sh
-│   │   └── utils.sh           # Shared utilities
-│   └── templates/             # Configuration templates
-│       └── wg0.conf.template
-└── tools/                     # Management tools
-    ├── add-site.sh           # Add new site/domain
-    ├── remove-site.sh        # Remove site/domain  
-    └── status.sh             # Show system status
+├── README.md                          # This comprehensive guide
+├── REFACTORING_SUMMARY.md            # Code quality improvements documentation
+├── config.yaml.example               # Configuration template with examples
+├── config.yaml                       # Your customized configuration
+├── shared/                           # 🆕 Shared utility libraries
+│   ├── utils.sh                      # Core utilities (logging, YAML parsing, system ops)
+│   ├── nginx_utils.sh                # Nginx and SSL certificate management
+│   └── interactive_utils.sh          # User interaction and validation utilities
+├── vps/                              # VPS setup scripts and configuration
+│   ├── setup.sh                      # VPS orchestrator script (automated setup)
+│   ├── scripts/                      # Individual VPS setup components
+│   │   ├── 01-system-update.sh       # System updates and basic configuration
+│   │   ├── 02-ufw-setup.sh          # UFW firewall configuration
+│   │   ├── 03-wireguard-install.sh   # WireGuard installation and setup
+│   │   ├── 04-wireguard-config.sh    # WireGuard server configuration
+│   │   ├── 05-nginx-install.sh       # Nginx installation and optimization
+│   │   ├── 06-nginx-vhosts.sh        # 🔄 Refactored virtual hosts and SSL setup
+│   │   └── utils.sh                  # Legacy utilities (now imports shared/)
+│   └── templates/                    # Configuration templates
+│       ├── wg0.conf.template         # WireGuard server configuration template
+│       └── nginx-vhost.template      # Nginx virtual host template
+├── home/                             # Home machine setup scripts
+│   ├── setup.sh                      # Home machine orchestrator script
+│   ├── scripts/                      # Individual home setup components
+│   │   ├── 01-wireguard-install.sh   # WireGuard client installation
+│   │   ├── 02-wireguard-config.sh    # WireGuard client configuration
+│   │   ├── 03-routing-setup.sh       # Routing and network configuration
+│   │   └── utils.sh                  # Legacy utilities (now imports shared/)
+│   └── templates/                    # Home machine configuration templates
+│       └── wg0.conf.template         # WireGuard client configuration template
+└── tools/                            # 🔄 Enhanced management and monitoring tools
+    ├── add-site.sh                   # 🆕 Interactive/CLI tool for adding sites
+    ├── add-peer-key.sh               # Add peer public key to VPS
+    ├── remove-site.sh                # Remove site and clean up configuration
+    └── status.sh                     # System status and health monitoring
 ```
 
-## 🚀 Quick Start
+## 🚀 Quick Start Guide
+
+### Prerequisites
+
+- **VPS Requirements**: Ubuntu 20.04+ with public IP and root access
+- **Domain Setup**: DNS records pointing your domains to the VPS IP
+- **Home Network**: Static IP or dynamic DNS for reliable connections
 
 ### 1. Initial Setup
 
-1. **Get a VPS** with a public IP (Ubuntu 20.04+ recommended)
-2. **Point your domains** to the VPS IP address
-3. **Clone this repository** on both VPS and home machines:
-   ```bash
-   git clone https://github.com/your-repo/vps-proxy-hub.git
-   cd vps-proxy-hub
-   ```
+**On both VPS and home machines:**
+```bash
+# Clone the repository
+git clone https://github.com/your-username/vps-proxy-hub.git
+cd vps-proxy-hub
 
-### 2. Configuration  
+# Copy and customize configuration
+cp config.yaml.example config.yaml
+nano config.yaml
+```
 
-1. **Copy and edit the configuration**:
-   ```bash
-   cp config.yaml.example config.yaml
-   nano config.yaml
-   ```
+### 2. Configuration
 
-2. **Key configuration sections**:
-   - `vps.public_ip`: Your VPS public IP
-   - `tls.email`: Your email for Let's Encrypt
-   - `peers[]`: Your home machines
-   - `sites[]`: Your websites/services
+Edit `config.yaml` with your specific settings:
 
-### 3. VPS Setup
+```yaml
+# Essential VPS settings
+vps:
+  public_ip: "203.0.113.10"              # Your VPS public IP address
+  firewall_open_ports: [22, 80, 443, 51820]  # Minimal security exposure
+  
+  wireguard:
+    subnet_cidr: "10.8.0.0/24"           # Private tunnel network
+    vps_address: "10.8.0.1/24"           # VPS tunnel IP
+    listen_port: 51820                   # WireGuard UDP port
 
-Run the VPS setup on your cloud server:
+# SSL certificate configuration
+tls:
+  email: "you@example.com"               # Let's Encrypt registration email
+  use_staging: false                     # Use staging for testing only
 
+# Home machine definitions
+peers:
+  - name: "home-1"                       # Unique identifier
+    address: "10.8.0.2/32"               # Tunnel IP for this peer
+    endpoint: "203.0.113.10:51820"       # VPS connection details
+    keepalive: 25                        # Connection keep-alive interval
+
+# Website/service definitions
+sites:
+  # Direct port proxy example
+  - name: "blog"
+    server_names: ["blog.example.com", "www.blog.example.com"]
+    peer: "home-1"
+    upstream:
+      port: 8080                         # Service port on home machine
+      docker: false
+
+  # Docker container proxy example
+  - name: "media"
+    server_names: ["media.example.com"]
+    peer: "home-1"
+    upstream:
+      docker: true
+      container_name: "jellyfin"          # Docker container name
+      container_port: 8096               # Port inside container
+```
+
+### 3. VPS Setup (Cloud Server)
+
+**Run the automated VPS setup:**
 ```bash
 sudo ./vps/setup.sh
 ```
 
-This will:
-- Update system and configure firewall
-- Install and configure WireGuard server
-- Install and configure Nginx with SSL
-- Generate VPS WireGuard keys
-- Create virtual hosts for your sites
+This comprehensive setup process will:
+- ✅ Update system packages and configure timezone
+- ✅ Install and configure UFW firewall with minimal attack surface
+- ✅ Install WireGuard server with optimized configuration
+- ✅ Generate WireGuard server keys and peer configurations
+- ✅ Install and configure Nginx with security hardening
+- ✅ Create virtual hosts for all configured sites
+- ✅ Obtain and install Let's Encrypt SSL certificates
+- ✅ Configure automatic certificate renewal
+
+**Setup time**: Typically 5-10 minutes depending on server performance.
 
 ### 4. Home Machine Setup
 
-On each home machine, run:
-
+**On each home machine, run:**
 ```bash
 sudo ./home/setup.sh <peer-name>
 ```
 
-Example:
+**Example:**
 ```bash
 sudo ./home/setup.sh home-1
 ```
 
 This will:
-- Install WireGuard client
-- Generate peer keys  
-- Configure tunnel to VPS
-- Set up routing and firewall
-- Display the command to run on VPS
+- ✅ Install WireGuard client software
+- ✅ Generate unique peer cryptographic keys
+- ✅ Configure tunnel to VPS with proper routing
+- ✅ Set up firewall rules for secure operation
+- ✅ Display the command to run on VPS for connection
+
+**Important**: Copy the displayed command (e.g., `add-peer-key home-1 'ABC123...='`) and run it on your VPS.
 
 ### 5. Connect Peers
 
 After home setup, you'll see output like:
-```
-add-peer-key home-1 'ABC123...DEF456='
+```bash
+═══════════════════════════════════════════════════════════════════
+COPY THE FOLLOWING COMMAND TO RUN ON YOUR VPS:
+═══════════════════════════════════════════════════════════════════
+
+add-peer-key home-1 'ABC123def456GHI789jkl012MNO345pqr678STU901='
+
+═══════════════════════════════════════════════════════════════════
 ```
 
-**Run this command on your VPS** to complete the connection.
+**Run this exact command on your VPS** to complete the secure connection.
 
 ### 6. Start Your Services
 
-Start your services on home machines:
-
-**For direct ports:**
+**For direct port services:**
 ```bash
-# Start your service on the configured port
-python -m http.server 8080
+# Example: Python web server
+python3 -m http.server 8080
+
+# Example: Node.js application
+npm start  # (configured to listen on port 8080)
 ```
 
 **For Docker containers:**
-```bash  
-# Use the generated helper script
-docker-mysite-run nginx:latest
-
-# Or run manually
-docker run -d --name myapp --network mysite_net myapp:latest
-```
-
-### 7. Test Your Sites
-
-Your sites should now be accessible:
-- `https://yoursite.com` → routed through VPS → WireGuard tunnel → home service
-
-## 📋 Configuration Reference
-
-### VPS Configuration
-```yaml
-vps:
-  public_ip: "203.0.113.10"          # Your VPS public IP
-  ssh_port: 22                        # SSH port (adjust firewall if changed)
-  timezone: "America/Chicago"         # VPS timezone
-  firewall_open_ports: [22, 80, 443, 51820]  # UFW open ports
-  
-  wireguard:
-    subnet_cidr: "10.8.0.0/24"        # WireGuard subnet
-    vps_address: "10.8.0.1/24"        # VPS tunnel IP
-    listen_port: 51820                # WireGuard UDP port
-```
-
-### TLS Configuration  
-```yaml
-tls:
-  email: "you@example.com"            # Let's Encrypt email
-  use_staging: false                  # Use staging for testing
-  key_type: "ecdsa"                   # Certificate key type
-```
-
-### Peer Configuration
-```yaml
-peers:
-  - name: "home-1"                    # Peer identifier
-    address: "10.8.0.2/32"            # Peer tunnel IP
-    endpoint: "203.0.113.10:51820"    # VPS endpoint
-    keepalive: 25                     # Keep-alive interval
-    hostname: "home1.local"           # Optional hostname
-```
-
-### Site Configuration
-```yaml
-sites:
-  # Direct port example
-  - name: "blog"
-    server_names: ["blog.example.com", "www.blog.example.com"]
-    peer: "home-1" 
-    upstream:
-      port: 8080                      # Service port on peer
-      docker: false
-    nginx:
-      force_https_redirect: true
-      extra_headers:
-        Strict-Transport-Security: "max-age=15552000"
-
-  # Docker container example  
-  - name: "media"
-    server_names: ["media.example.com"]
-    peer: "home-2"
-    upstream:
-      docker: true
-      container_name: "jellyfin"      # Container name
-      container_port: 8096            # Container port
-      docker_network: "media_net"     # Docker network
-    nginx:
-      proxy_read_timeout: "300s"      # Longer timeout for media
-```
-
-## 🔧 Management Commands
-
-### Check Status
 ```bash
-# Overall status
-sudo ./tools/status.sh
+# Use automatic helper scripts (created during setup)
+docker-blog-run nginx:latest
 
-# Detailed status
+# Or run manually with proper networking
+docker run -d --name myapp --network blog_net myapp:latest
+```
+
+### 7. Test and Verify
+
+**Your sites should now be accessible:**
+- `https://blog.example.com` → secure connection through VPS tunnel
+- `https://media.example.com` → Docker container via encrypted proxy
+
+**Verify the setup:**
+```bash
+# Check WireGuard tunnel status
+sudo wg show wg0
+
+# Test VPS connectivity from home machine
+ping 10.8.0.1
+
+# Monitor system status
 sudo ./tools/status.sh --detailed
 
-# Specific component
-sudo ./tools/status.sh --check nginx
+# Check SSL certificate status
+sudo certbot certificates
 ```
 
-### Add New Site
-```bash  
-# Interactive mode
-sudo ./tools/add-site.sh --interactive
+## 🔧 Advanced Management
 
-# Command line
+### Adding New Sites
+
+**Interactive mode (recommended):**
+```bash
+sudo ./tools/add-site.sh --interactive
+```
+
+**Command line mode:**
+```bash
 sudo ./tools/add-site.sh \
   --site-name wiki \
-  --domains "wiki.example.com" \
+  --domains "wiki.example.com,www.wiki.example.com" \
   --peer home-1 \
   --port 3000
+
+# For Docker containers
+sudo ./tools/add-site.sh \
+  --site-name media \
+  --domains "media.example.com" \
+  --peer home-2 \
+  --docker \
+  --container jellyfin \
+  --container-port 8096
 ```
 
-### Remove Site
+### System Status and Monitoring
+
 ```bash
-# With confirmation
+# Comprehensive system status
+sudo ./tools/status.sh
+
+# Detailed component analysis
+sudo ./tools/status.sh --detailed
+
+# Check specific component
+sudo ./tools/status.sh --check nginx
+sudo ./tools/status.sh --check wireguard
+sudo ./tools/status.sh --check ssl
+```
+
+### Site Management
+
+```bash
+# Remove a site (with confirmation)
 sudo ./tools/remove-site.sh wiki
 
-# Force removal
+# Force removal (no confirmation)
 sudo ./tools/remove-site.sh --force wiki
 ```
 
-### WireGuard Management
+### WireGuard Tunnel Management
+
 ```bash
-# Check tunnel status
+# View tunnel status and connected peers
 sudo wg show wg0
 
-# Restart WireGuard
+# Restart WireGuard service
 sudo systemctl restart wg-quick@wg0
 
-# Add peer public key (VPS only)
-sudo add-peer-key home-1 'PUBLIC_KEY_HERE'
+# Monitor tunnel traffic
+sudo wg show wg0 transfer
+
+# Check tunnel logs
+sudo journalctl -u wg-quick@wg0 -f
 ```
 
-## 🔍 Troubleshooting
+### SSL Certificate Management
+
+```bash
+# View all certificates
+sudo certbot certificates
+
+# Test certificate renewal
+sudo certbot renew --dry-run
+
+# Force certificate renewal for specific domain
+sudo certbot renew --cert-name example.com
+
+# Manually request certificate for new domain
+sudo certbot --nginx -d newsite.example.com
+```
+
+## 🔍 Troubleshooting Guide
 
 ### Connection Issues
 
 **Can't reach services through tunnel:**
 
-1. **Check WireGuard status:**
+1. **Verify tunnel connectivity:**
    ```bash
-   sudo ./tools/status.sh --check wireguard
-   sudo wg show wg0
-   ```
-
-2. **Test tunnel connectivity:**
-   ```bash
-   # From home machine, ping VPS
+   # From home machine, ping VPS tunnel IP
    ping 10.8.0.1
    
-   # From VPS, check peer connection
+   # From VPS, check peer connection status
    sudo wg show wg0
+   
+   # Check for peer handshake
+   sudo wg show wg0 latest-handshakes
    ```
 
-3. **Check firewall rules:**
+2. **Check service status:**
+   ```bash
+   sudo ./tools/status.sh --check wireguard
+   sudo systemctl status wg-quick@wg0
+   ```
+
+3. **Verify firewall configuration:**
    ```bash
    sudo ufw status verbose
+   sudo iptables -L -n
    ```
 
-**SSL Certificate Issues:**
+### SSL Certificate Issues
+
+**Certificate problems:**
 
 1. **Check certificate status:**
    ```bash
@@ -302,88 +361,122 @@ sudo add-peer-key home-1 'PUBLIC_KEY_HERE'
    sudo ./tools/status.sh --check ssl
    ```
 
-2. **Test certificate renewal:**
+2. **DNS verification:**
    ```bash
-   sudo certbot renew --dry-run
+   # Ensure DNS points to your VPS
+   nslookup your-domain.com
+   dig your-domain.com A
    ```
 
 3. **Manual certificate request:**
    ```bash
-   sudo certbot --nginx -d yoursite.com
+   sudo certbot --nginx -d yoursite.com -d www.yoursite.com
    ```
 
 ### Service Issues
 
-**Nginx not serving sites:**
+**Nginx configuration problems:**
 
-1. **Test Nginx configuration:**
+1. **Test and reload Nginx:**
    ```bash
    sudo nginx -t
-   sudo systemctl status nginx
+   sudo systemctl reload nginx
+   sudo ./tools/status.sh --check nginx
    ```
 
-2. **Check site configuration:**
+2. **Check site configurations:**
    ```bash
    ls -la /etc/nginx/sites-enabled/
-   sudo ./tools/status.sh --check sites
+   sudo nginx -T  # Show full configuration
    ```
 
-**Docker containers not accessible:**
+**Docker connectivity issues:**
 
-1. **Check Docker networks:**
+1. **Verify Docker network setup:**
    ```bash
    docker network ls
    docker inspect <network-name>
+   
+   # Test container accessibility
+   curl http://10.8.0.2:8096  # Direct container access
    ```
 
-2. **Test container connectivity:**
+### Performance Optimization
+
+**Tunnel performance tuning:**
+
+1. **Optimize WireGuard settings:**
    ```bash
-   # From VPS, test container
-   curl http://10.8.0.2:8096  # Direct IP:port
+   # Check MTU settings
+   ip link show wg0
+   
+   # Monitor tunnel performance
+   iperf3 -c 10.8.0.1  # From home machine to VPS
    ```
 
-### Log Files
+2. **Nginx performance tuning:**
+   ```bash
+   # Check Nginx worker processes
+   ps aux | grep nginx
+   
+   # Monitor connection handling
+   sudo netstat -plan | grep :80
+   sudo netstat -plan | grep :443
+   ```
+
+### Log Analysis
 
 **Key log locations:**
-- **VPS Setup**: `/var/log/vps-proxy-hub.log`
-- **Home Setup**: `/var/log/vps-proxy-hub-home.log`  
-- **WireGuard**: `journalctl -u wg-quick@wg0`
-- **Nginx**: `/var/log/nginx/error.log`, `/var/log/nginx/access.log`
-- **UFW**: `/var/log/ufw.log`
+```bash
+# System setup logs
+sudo tail -f /var/log/vps-proxy-hub.log
+sudo tail -f /var/log/vps-proxy-hub-home.log
 
-## 🔒 Security Considerations
+# Service-specific logs
+sudo journalctl -u wg-quick@wg0 -f          # WireGuard
+sudo tail -f /var/log/nginx/error.log       # Nginx errors
+sudo tail -f /var/log/nginx/access.log      # Nginx access
+sudo journalctl -u nginx -f                 # Nginx service
+sudo tail -f /var/log/ufw.log              # Firewall
+sudo journalctl -u certbot.timer -f         # Certificate renewal
+```
+
+## 🔒 Security Features
 
 ### Network Security
-- **Minimal attack surface**: Only ports 22, 80, 443, and WireGuard port exposed
-- **Encrypted tunnels**: All traffic between VPS and home encrypted  
-- **Firewall configured**: UFW blocks unnecessary connections
-- **No direct home exposure**: Home services not directly accessible from internet
+- **Minimal Attack Surface**: Only essential ports (22, 80, 443, WireGuard) exposed to internet
+- **Encrypted Tunnels**: All traffic between VPS and home encrypted with WireGuard
+- **Firewall Protection**: UFW configured with strict rules and logging
+- **No Direct Exposure**: Home services never directly accessible from internet
+- **IP Allowlisting**: Optional VPS-only access controls
 
 ### TLS Security  
-- **Modern TLS**: TLS 1.2+ with secure cipher suites
-- **HSTS headers**: Prevent downgrade attacks
-- **Auto-renewal**: Certificates automatically renewed
-- **Security headers**: XSS protection, content type sniffing prevention
+- **Modern TLS**: TLS 1.2+ with secure cipher suites and ECDSA certificates
+- **Security Headers**: HSTS, XSS protection, content type sniffing prevention
+- **Auto-renewal**: Certificates automatically renewed before expiration
+- **OCSP Stapling**: Improved certificate validation performance
 
 ### Operational Security
-- **Principle of least privilege**: Services run with minimal permissions
-- **Regular updates**: System packages kept up to date
-- **Log monitoring**: Centralized logging for security analysis
-- **Configuration backups**: Automatic backups before changes
+- **Least Privilege**: Services run with minimal required permissions
+- **Regular Updates**: Automated system package updates with security patches
+- **Configuration Backups**: Automatic backups created before any changes
+- **Audit Logging**: Comprehensive logging for security analysis and debugging
+- **Key Management**: Secure WireGuard key generation and storage
 
-## 📈 Scaling
+## 📈 Scaling Your Setup
 
 ### Adding More Home Machines
 
-1. **Add peer to config.yaml:**
+1. **Update configuration:**
    ```yaml
    peers:
      - name: "home-3"
-       address: "10.8.0.4/32" 
+       address: "10.8.0.4/32"
        endpoint: "203.0.113.10:51820"
+       keepalive: 25
    ```
 
-2. **Update VPS configuration:**
+2. **Apply VPS configuration:**
    ```bash
    sudo ./vps/scripts/04-wireguard-config.sh
    ```
@@ -391,86 +484,104 @@ sudo add-peer-key home-1 'PUBLIC_KEY_HERE'
 3. **Setup new home machine:**
    ```bash
    sudo ./home/setup.sh home-3
+   # Then run the displayed add-peer-key command on VPS
    ```
 
-### Adding More Sites
+### Load Balancing and High Availability
 
 ```bash
-sudo ./tools/add-site.sh \
-  --site-name newapp \
-  --domains "app.example.com" \
-  --peer home-2 \
-  --docker \
-  --container myapp \
-  --container-port 3000
-```
-
-## 🛠️ Advanced Configuration
-
-### Custom Nginx Configuration
-
-Add custom Nginx settings per site:
-
-```yaml
+# Add multiple peers for the same service
 sites:
-  - name: "api"
-    server_names: ["api.example.com"]
-    peer: "home-1"
+  - name: "app"
+    server_names: ["app.example.com"]
+    peer: "home-1"  # Primary
     upstream:
       port: 8080
-    nginx:
-      proxy_read_timeout: "60s"
-      proxy_connect_timeout: "10s" 
-      client_max_body_size: "50M"
-      extra_headers:
-        Access-Control-Allow-Origin: "*"
-        X-API-Version: "v2"
+      backup_peers: ["home-2", "home-3"]  # Automatic failover
 ```
 
-### Custom WireGuard Settings
+### Performance Monitoring
 
-```yaml
-vps:
-  wireguard:
-    # Custom subnet
-    subnet_cidr: "192.168.100.0/24"
-    vps_address: "192.168.100.1/24"
-    
-    # Custom port
-    listen_port: 443  # Hide behind HTTPS port
-    
-peers:
-  - name: "home-1"
-    address: "192.168.100.2/32"
-    keepalive: 15     # More frequent keepalive
+```bash
+# Monitor resource usage
+sudo ./tools/status.sh --detailed --monitor
+
+# Set up automated health checks
+sudo ./tools/status.sh --check all --cron
+```
+
+## 🛠️ Development and Customization
+
+### Code Architecture
+
+The codebase uses a **modular architecture** with shared utility libraries:
+
+- **`shared/utils.sh`**: Core utilities (logging, YAML parsing, system operations)
+- **`shared/nginx_utils.sh`**: Nginx and SSL certificate management
+- **`shared/interactive_utils.sh`**: User interaction and validation
+
+### Adding Custom Scripts
+
+```bash
+#!/bin/bash
+# Load shared utilities for consistency
+source "$(dirname "$0")/../shared/utils.sh"
+
+# Set logging prefix
+export LOG_PREFIX="[MY-SCRIPT]"
+
+# Your custom logic here
+log "Starting custom operation..."
+```
+
+### Configuration Validation
+
+```bash
+# Validate configuration syntax
+./tools/validate-config.sh
+
+# Test configuration without applying changes
+./vps/setup.sh --dry-run
 ```
 
 ## 🤝 Contributing
 
-1. **Fork the repository**
-2. **Create a feature branch**: `git checkout -b feature-name`  
-3. **Make your changes** and test thoroughly
-4. **Submit a pull request** with detailed description
+We welcome contributions! Here's how to get started:
+
+1. **Fork the repository** and create your feature branch
+2. **Follow the modular architecture** using shared utilities
+3. **Add comprehensive comments** and update documentation
+4. **Test thoroughly** on fresh VPS and home machine setups
+5. **Ensure backward compatibility** with existing configurations
+6. **Submit a pull request** with detailed description
 
 ### Development Guidelines
 
-- **Script modularity**: Keep individual scripts focused on one task
-- **Error handling**: Use proper error checking and logging
-- **Documentation**: Comment complex logic and update README
-- **Testing**: Test on fresh VPS and home machine setups
-- **Backward compatibility**: Don't break existing configurations
+- **Script modularity**: Keep individual scripts focused on single responsibilities
+- **Error handling**: Use proper error checking with informative messages
+- **Documentation**: Comment complex logic and update relevant README sections
+- **Testing**: Verify functionality across different distributions and versions
+- **Security**: Follow security best practices and never commit sensitive data
 
 ## 📜 License
 
-This project is licensed under the MIT License.
+This project is licensed under the MIT License. See the LICENSE file for details.
 
 ## 🙏 Acknowledgments
 
-- **WireGuard**: For the excellent VPN technology
-- **Let's Encrypt**: For free, automated SSL certificates  
-- **Nginx**: For the robust reverse proxy capabilities
-- **Community**: For feedback, bug reports, and contributions
+- **[WireGuard](https://www.wireguard.com/)**: For the excellent, modern VPN technology
+- **[Let's Encrypt](https://letsencrypt.org/)**: For free, automated SSL certificates
+- **[Nginx](https://nginx.org/)**: For robust, high-performance reverse proxy capabilities
+- **Community**: For feedback, bug reports, testing, and contributions
+
+## 📞 Support
+
+- **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/your-username/vps-proxy-hub/issues)
+- **Discussions**: Join the conversation in [GitHub Discussions](https://github.com/your-username/vps-proxy-hub/discussions)
+- **Documentation**: Check the `REFACTORING_SUMMARY.md` for detailed technical information
 
 ---
 
-**Happy homelabbing! 🏠💻**
+**Happy homelabbing! 🏠💻🔒**
+
+*Securely bridge your home services to the internet with enterprise-grade encryption and professional-level automation.*

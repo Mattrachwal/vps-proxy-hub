@@ -1,36 +1,19 @@
 #!/bin/bash
 # VPS Proxy Hub - Add New Site Tool
 # Adds a new site/domain to peer mapping to the configuration and regenerates services
+#
+# This script provides both interactive and command-line modes for adding new sites
+# to the VPS Proxy Hub configuration. It automatically updates nginx configurations.
 
 set -euo pipefail
 
-# Script configuration
+# Load shared utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/../config.yaml}"
+source "$SCRIPT_DIR/../shared/utils.sh"
+source "$SCRIPT_DIR/../shared/interactive_utils.sh"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Logging functions
-log() {
-    echo -e "${BLUE}[ADD-SITE]${NC} $*"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $*"
-}
+# Set logging prefix for this script
+export LOG_PREFIX="[ADD-SITE]"
 
 # Show usage information
 show_usage() {
@@ -59,35 +42,12 @@ Interactive mode will prompt for all required information.
 EOF
 }
 
-# Check prerequisites
+# Check prerequisites using shared utility functions
 check_prerequisites() {
-    # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        log_error "This script must be run as root"
-        exit 1
-    fi
-    
-    # Check if config file exists
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        log_error "Configuration file not found: $CONFIG_FILE"
-        exit 1
-    fi
-    
-    # Install yq if not present
-    if ! command -v yq &> /dev/null; then
-        log "Installing yq for YAML manipulation..."
-        if command -v snap &> /dev/null; then
-            snap install yq
-        elif command -v wget &> /dev/null; then
-            YQ_VERSION="v4.35.2"
-            YQ_BINARY="yq_linux_amd64"
-            wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}"
-            chmod +x /usr/local/bin/yq
-        else
-            log_error "Could not install yq. Please install manually."
-            exit 1
-        fi
-    fi
+    # Use shared utility functions for common checks
+    check_root
+    check_config
+    install_yq
 }
 
 # Show available peers
@@ -96,123 +56,39 @@ show_available_peers() {
     yq eval '.peers[] | "  - " + .name + " (" + .address + ")"' "$CONFIG_FILE"
 }
 
-# Validate peer exists
+# Validate peer exists using shared utility function
 validate_peer() {
     local peer_name="$1"
-    
-    if yq eval ".peers[] | select(.name == \"$peer_name\") | .name" "$CONFIG_FILE" 2>/dev/null | grep -q "$peer_name"; then
-        return 0
-    else
-        return 1
-    fi
+    validate_peer_name "$peer_name"
 }
 
-# Interactive mode
+# Interactive mode using modular utility functions
+# Guides user through site configuration with validation
 interactive_mode() {
     echo "═══ Interactive Site Addition ═══"
     echo ""
     
-    # Site name
-    read -p "Site name (internal reference): " SITE_NAME
-    while [[ -z "$SITE_NAME" ]]; do
-        echo "Site name cannot be empty."
-        read -p "Site name (internal reference): " SITE_NAME
-    done
-    
-    # Check if site name already exists
-    if yq eval ".sites[] | select(.name == \"$SITE_NAME\") | .name" "$CONFIG_FILE" 2>/dev/null | grep -q "$SITE_NAME"; then
+    # Get site name and check if it already exists
+    prompt_required_string "Site name (internal reference)" SITE_NAME
+    if check_site_exists "$SITE_NAME"; then
         log_error "Site '$SITE_NAME' already exists in configuration"
         exit 1
     fi
     
-    # Domains
+    # Get domains list
     echo ""
-    echo "Enter domains (comma-separated, e.g., 'site.com,www.site.com'):"
-    read -p "Domains: " DOMAINS_INPUT
-    while [[ -z "$DOMAINS_INPUT" ]]; do
-        echo "At least one domain is required."
-        read -p "Domains: " DOMAINS_INPUT
-    done
+    prompt_domains_list DOMAINS
     
-    # Convert comma-separated domains to array
-    IFS=',' read -ra DOMAINS_ARRAY <<< "$DOMAINS_INPUT"
-    DOMAINS=()
-    for domain in "${DOMAINS_ARRAY[@]}"; do
-        # Trim whitespace
-        domain=$(echo "$domain" | xargs)
-        if [[ -n "$domain" ]]; then
-            DOMAINS+=("$domain")
-        fi
-    done
+    # Get peer selection
+    prompt_peer_selection PEER_NAME
     
-    # Peer selection
-    echo ""
-    show_available_peers
-    echo ""
-    read -p "Peer name: " PEER_NAME
-    while [[ -z "$PEER_NAME" ]] || ! validate_peer "$PEER_NAME"; do
-        echo "Invalid peer name. Please select from the available peers above."
-        read -p "Peer name: " PEER_NAME
-    done
+    # Get service type configuration
+    prompt_service_type IS_DOCKER SERVICE_PORT CONTAINER_NAME CONTAINER_PORT
     
-    # Service type
-    echo ""
-    echo "Service type:"
-    echo "1. Direct port (service running on peer machine)"
-    echo "2. Docker container (service running in Docker)"
-    read -p "Select option (1 or 2): " SERVICE_TYPE
+    # Show configuration summary and get confirmation
+    show_configuration_summary "$SITE_NAME" DOMAINS "$PEER_NAME" "$IS_DOCKER" "$SERVICE_PORT" "$CONTAINER_NAME" "$CONTAINER_PORT"
     
-    IS_DOCKER=false
-    case "$SERVICE_TYPE" in
-        1)
-            # Direct port
-            echo ""
-            read -p "Service port: " SERVICE_PORT
-            while [[ ! "$SERVICE_PORT" =~ ^[0-9]+$ ]] || [[ "$SERVICE_PORT" -lt 1 ]] || [[ "$SERVICE_PORT" -gt 65535 ]]; do
-                echo "Invalid port number. Please enter a number between 1 and 65535."
-                read -p "Service port: " SERVICE_PORT
-            done
-            ;;
-        2)
-            # Docker container
-            IS_DOCKER=true
-            echo ""
-            read -p "Container name: " CONTAINER_NAME
-            while [[ -z "$CONTAINER_NAME" ]]; do
-                echo "Container name cannot be empty."
-                read -p "Container name: " CONTAINER_NAME
-            done
-            
-            read -p "Container port: " CONTAINER_PORT
-            while [[ ! "$CONTAINER_PORT" =~ ^[0-9]+$ ]] || [[ "$CONTAINER_PORT" -lt 1 ]] || [[ "$CONTAINER_PORT" -gt 65535 ]]; do
-                echo "Invalid port number. Please enter a number between 1 and 65535."
-                read -p "Container port: " CONTAINER_PORT
-            done
-            ;;
-        *)
-            log_error "Invalid selection"
-            exit 1
-            ;;
-    esac
-    
-    # Confirmation
-    echo ""
-    echo "═══ Site Configuration Summary ═══"
-    echo "Site Name: $SITE_NAME"
-    echo "Domains: ${DOMAINS[*]}"
-    echo "Peer: $PEER_NAME"
-    if [[ "$IS_DOCKER" == "true" ]]; then
-        echo "Type: Docker container"
-        echo "Container: $CONTAINER_NAME"
-        echo "Port: $CONTAINER_PORT"
-    else
-        echo "Type: Direct port"
-        echo "Port: $SERVICE_PORT"
-    fi
-    echo ""
-    
-    read -p "Add this site? (y/N): " CONFIRM
-    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+    if ! get_confirmation "Add this site?"; then
         log "Site addition cancelled"
         exit 0
     fi
@@ -283,57 +159,15 @@ parse_arguments() {
     done
 }
 
-# Validate arguments
+# Validate arguments using shared utility functions
 validate_arguments() {
     if [[ "$INTERACTIVE" == "true" ]]; then
         return 0
     fi
     
-    # Required arguments
-    if [[ -z "$SITE_NAME" ]]; then
-        log_error "--site-name is required"
+    # Use shared validation function
+    if ! validate_site_arguments "$SITE_NAME" DOMAINS "$PEER_NAME" "$IS_DOCKER" "$SERVICE_PORT" "$CONTAINER_NAME" "$CONTAINER_PORT"; then
         exit 1
-    fi
-    
-    if [[ ${#DOMAINS[@]} -eq 0 ]]; then
-        log_error "--domains is required"
-        exit 1
-    fi
-    
-    if [[ -z "$PEER_NAME" ]]; then
-        log_error "--peer is required"
-        exit 1
-    fi
-    
-    # Validate peer exists
-    if ! validate_peer "$PEER_NAME"; then
-        log_error "Peer '$PEER_NAME' not found in configuration"
-        echo ""
-        show_available_peers
-        exit 1
-    fi
-    
-    # Check if site name already exists
-    if yq eval ".sites[] | select(.name == \"$SITE_NAME\") | .name" "$CONFIG_FILE" 2>/dev/null | grep -q "$SITE_NAME"; then
-        log_error "Site '$SITE_NAME' already exists in configuration"
-        exit 1
-    fi
-    
-    # Service configuration validation
-    if [[ "$IS_DOCKER" == "true" ]]; then
-        if [[ -z "$CONTAINER_NAME" ]]; then
-            log_error "--container is required when using --docker"
-            exit 1
-        fi
-        if [[ -z "$CONTAINER_PORT" ]]; then
-            log_error "--container-port is required when using --docker"
-            exit 1
-        fi
-    else
-        if [[ -z "$SERVICE_PORT" ]]; then
-            log_error "--port is required when not using --docker"
-            exit 1
-        fi
     fi
 }
 
