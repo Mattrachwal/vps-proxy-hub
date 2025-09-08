@@ -195,15 +195,17 @@ extract_site_field() {
 }
 
 # Get peer tunnel IP address (without CIDR notation)
+# Uses improved config utilities for better error handling
 get_peer_tunnel_ip() {
     local peer_name="$1"
     
-    local address
-    if command -v yq &> /dev/null; then
-        address=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .address" "$CONFIG_FILE" 2>/dev/null || echo "")
-    else
-        address=$(extract_peer_field "$peer_name" "address")
+    # First validate the peer exists
+    if ! validate_peer_config "$peer_name"; then
+        return 1
     fi
+    
+    local address
+    address=$(get_peer_config "$peer_name" "address")
     
     if [[ -n "$address" && "$address" != "null" ]]; then
         # Remove CIDR notation to get just the IP

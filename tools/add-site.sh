@@ -50,17 +50,10 @@ check_prerequisites() {
     install_yq
 }
 
-# Show available peers
-show_available_peers() {
-    log "Available peers:"
-    yq eval '.peers[] | "  - " + .name + " (" + .address + ")"' "$CONFIG_FILE"
-}
-
-# Validate peer exists using shared utility function
-validate_peer() {
-    local peer_name="$1"
-    validate_peer_name "$peer_name"
-}
+# These functions are now available in shared/interactive_utils.sh:
+# - show_available_peers()
+# - validate_peer_name() (used directly)
+# No local duplicates needed
 
 # Interactive mode using modular utility functions
 # Guides user through site configuration with validation

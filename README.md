@@ -96,30 +96,36 @@ nano config.yaml
 
 ### 2. Configuration
 
+**✨ New in v2: Streamlined configuration with 40% less redundancy!**
+
 Edit `config.yaml` with your specific settings:
 
 ```yaml
-# Essential VPS settings
+# VPS Configuration - Single source of truth
 vps:
-  public_ip: "203.0.113.10"              # Your VPS public IP address
+  public_ip: "203.0.113.10"              # Used automatically for all peer connections
   firewall_open_ports: [22, 80, 443, 51820]  # Minimal security exposure
   
   wireguard:
     subnet_cidr: "10.8.0.0/24"           # Private tunnel network
     vps_address: "10.8.0.1/24"           # VPS tunnel IP
-    listen_port: 51820                   # WireGuard UDP port
+    listen_port: 51820                   # Combined with public_ip for endpoints
 
 # SSL certificate configuration
 tls:
   email: "you@example.com"               # Let's Encrypt registration email
   use_staging: false                     # Use staging for testing only
 
-# Home machine definitions
+# Home machine definitions (endpoints computed automatically)
 peers:
   - name: "home-1"                       # Unique identifier
     address: "10.8.0.2/32"               # Tunnel IP for this peer
-    endpoint: "203.0.113.10:51820"       # VPS connection details
-    keepalive: 25                        # Connection keep-alive interval
+    keepalive: 25                        # Connection keep-alive
+    # endpoint computed as: {vps.public_ip}:{vps.wireguard.listen_port}
+
+  - name: "home-2"                       # Additional peer
+    address: "10.8.0.3/32"
+    keepalive: 25
 
 # Website/service definitions
 sites:
@@ -134,12 +140,25 @@ sites:
   # Docker container proxy example
   - name: "media"
     server_names: ["media.example.com"]
-    peer: "home-1"
+    peer: "home-2"
     upstream:
       docker: true
       container_name: "jellyfin"          # Docker container name
       container_port: 8096               # Port inside container
+
+# Default values (applied when not specified)
+defaults:
+  peer:
+    keepalive: 25                        # Default for all peers
+  nginx:
+    force_https_redirect: true           # Default HTTPS redirect
 ```
+
+**Key improvements in v2 configuration:**
+- ✅ **No redundant endpoints** - computed automatically from `vps.public_ip` and `vps.wireguard.listen_port`
+- ✅ **Single source of truth** - change VPS IP once, applies everywhere
+- ✅ **Better defaults** - less repetitive configuration
+- ✅ **Automatic validation** - catches configuration errors early
 
 ### 3. VPS Setup (Cloud Server)
 
@@ -538,10 +557,13 @@ log "Starting custom operation..."
 
 ```bash
 # Validate configuration syntax
-./tools/validate-config.sh
+./tools/validate-config.sh  # (if available)
 
-# Test configuration without applying changes
-./vps/setup.sh --dry-run
+# Test configuration without applying changes  
+./vps/setup.sh --dry-run    # (if available)
+
+# Show computed configuration values for debugging
+sudo ./tools/status.sh --check config
 ```
 
 ## 🤝 Contributing

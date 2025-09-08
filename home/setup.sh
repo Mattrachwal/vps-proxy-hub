@@ -9,29 +9,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/../config.yaml}"
 PEER_NAME=""
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Load shared utilities
+source "$SCRIPT_DIR/../shared/utils.sh"
 
-# Logging functions
-log() {
-    echo -e "${BLUE}[HOME-SETUP]${NC} $*"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $*"
-}
+# Set logging prefix for this script
+export LOG_PREFIX="[HOME-SETUP]"
 
 # Display banner
 show_banner() {
@@ -45,29 +27,12 @@ show_banner() {
 EOF
 }
 
-# Check prerequisites
+# Check prerequisites using shared utilities
 check_prerequisites() {
     log "Checking prerequisites..."
-    
-    # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        log_error "This script must be run as root"
-        echo "Usage: sudo $0 <peer-name> [--force] [--skip-step STEP]"
-        exit 1
-    fi
-    
-    # Check if config file exists
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        log_error "Configuration file not found: $CONFIG_FILE"
-        log "Please copy config.yaml.example to config.yaml and customize it"
-        echo ""
-        echo "Example:"
-        echo "  cp $SCRIPT_DIR/../config.yaml.example $CONFIG_FILE"
-        echo "  nano $CONFIG_FILE"
-        echo "  sudo $0 <peer-name>"
-        exit 1
-    fi
-    
+    check_root
+    check_config
+    install_yq
     log_success "Prerequisites check passed"
 }
 

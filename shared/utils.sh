@@ -398,6 +398,9 @@ display_peer_info() {
 # INITIALIZATION
 # =============================================================================
 
+# Load configuration utilities for enhanced config handling
+source "$(dirname "${BASH_SOURCE[0]}")/config_utils.sh"
+
 # Log that utilities have been loaded
 log_debug "Shared utilities loaded successfully"
 

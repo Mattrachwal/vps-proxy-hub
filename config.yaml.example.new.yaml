@@ -1,0 +1,131 @@
+# VPS Proxy Hub Configuration
+# Streamlined config with minimal redundancy - all common values computed automatically
+# from base settings to ensure consistency and reduce maintenance overhead.
+
+version: 2  # Updated to indicate the improved structure
+
+# VPS Configuration - Single source of truth for server details
+vps:
+  public_ip: "203.0.113.10"              # VPS public IP or DNS - used everywhere needed
+  ssh_port: 22                           # SSH port (also added to firewall automatically)
+  timezone: "America/Chicago"            # Server timezone
+  
+  # Firewall configuration - ports calculated automatically where possible
+  firewall_open_ports: [22, 80, 443, 51820]  # Only specify non-standard ports here
+  
+  # System configuration
+  sysctl:
+    ipv4_forward: true                   # Required for routing
+  
+  # WireGuard server configuration
+  wireguard:
+    subnet_cidr: "10.8.0.0/24"          # Private tunnel network
+    vps_address: "10.8.0.1/24"          # VPS address within tunnel
+    listen_port: 51820                  # WireGuard UDP port
+    
+    # Key storage paths - consistent for all deployments
+    private_key_path: "/etc/wireguard/vps-private.key"
+    public_key_path: "/etc/wireguard/vps-public.key"
+    peers_dir: "/etc/wireguard/peers"    # Directory for peer public keys
+    
+    # VPS public key - IMPORTANT: Required for home machine setup
+    # This is generated automatically during VPS setup and should be updated here
+    # Home machines use this to authenticate the VPS WireGuard server
+    public_key: "REPLACE_WITH_VPS_PUBLIC_KEY_AFTER_FIRST_RUN"
+    # Example: "f6Pg716nhAdJwFDN+siNf5ATt40hy8+QrGUEsaqjoA8="
+
+# TLS/SSL Configuration
+tls:
+  email: "you@example.com"               # Let's Encrypt registration email
+  use_staging: false                     # Set true for testing to avoid rate limits
+  key_type: "ecdsa"                      # Certificate type: ecdsa or rsa
+  elliptic_curve: "secp256r1"            # Used when key_type = ecdsa
+
+# Peer Definitions - Simplified with computed values
+# All peers automatically use: vps.public_ip:vps.wireguard.listen_port as endpoint
+peers:
+  - name: "home-1"
+    address: "10.8.0.2/32"               # Tunnel IP for this peer
+    hostname: "home1.local"              # Optional: local hostname for identification
+    keepalive: 25                        # Connection keepalive (can override default)
+
+  - name: "home-2" 
+    address: "10.8.0.3/32"
+    hostname: "home2.local"
+    keepalive: 25
+
+# Website/Service Definitions - Clean structure focused on unique values
+sites:
+  # Direct port proxy example
+  - name: "blog"
+    server_names: ["blog.example.com", "www.blog.example.com"]
+    peer: "home-1"
+    upstream:
+      port: 8080                         # Service port on home machine
+      docker: false
+    nginx:
+      force_https_redirect: true
+      extra_headers:
+        Strict-Transport-Security: "max-age=15552000; includeSubDomains; preload"
+        X-Content-Type-Options: "nosniff"
+        X-Frame-Options: "SAMEORIGIN"
+        Referrer-Policy: "strict-origin-when-cross-origin"
+
+  # Docker container proxy example
+  - name: "media"
+    server_names: ["media.example.com"]
+    peer: "home-2"
+    upstream:
+      docker: true
+      container_name: "jellyfin"          # Container name for internal resolution
+      container_port: 8096               # Port inside container
+      docker_network: "media_net"        # Docker network (optional)
+    nginx:
+      proxy_read_timeout: "300s"         # Longer timeout for media streaming
+      extra_headers:
+        X-Accel-Buffering: "no"          # Disable buffering for media
+
+  # Simple service example (minimal config)
+  - name: "wiki"
+    server_names: ["wiki.example.com"]
+    peer: "home-1"
+    upstream:
+      port: 8081
+      docker: false
+
+# Default Values - Applied when not specified
+# Reduces repetition and ensures consistency
+defaults:
+  peer:
+    keepalive: 25                        # Default keepalive for all peers
+    private_key_path: "/etc/wireguard/home-private.key"
+    public_key_path: "/etc/wireguard/home-public.key"
+  
+  nginx:
+    access_log: "/var/log/nginx/access.log"
+    error_log: "/var/log/nginx/error.log"
+    keepalive_timeout: "15s"
+    force_https_redirect: true           # Default to HTTPS redirect
+    
+  docker:
+    network: "bridge"                    # Default Docker network
+
+# Operational Configuration
+ops:
+  certbot_dry_run_on_apply: false        # Set true for testing certificate requests
+  nginx_disable_access_log_for_high_churn: false
+  create_swapfile_gb: 1                  # Create swap on small VPS to prevent OOM
+
+# Configuration Workflow:
+# 1. Customize this config with your VPS IP, domains, and peer details
+# 2. Run VPS setup: sudo ./vps/setup.sh
+# 3. VPS setup will generate WireGuard keys and display the public key
+# 4. Update the 'public_key' field above with the generated VPS public key
+# 5. Run home setup: sudo ./home/setup.sh <peer-name>
+# 6. Add the displayed peer key to VPS using the provided command
+#
+# Configuration Computed Values (automatically derived):
+# • VPS endpoint: {vps.public_ip}:{vps.wireguard.listen_port}
+# • Peer endpoints: All peers use the computed VPS endpoint  
+# • Firewall ports: Includes vps.ssh_port and vps.wireguard.listen_port automatically
+# • WireGuard configs: Generated from single source values
