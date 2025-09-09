@@ -9,14 +9,16 @@ set -euo pipefail
 # GLOBAL CONFIGURATION
 # =============================================================================
 
-# Colors for output formatting
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[1;33m'
-readonly BLUE='\033[0;34m'
-readonly CYAN='\033[0;36m'
-readonly BOLD='\033[1m'
-readonly NC='\033[0m' # No Color
+# Colors for output formatting (only set if not already defined)
+if [[ -z "${RED:-}" ]]; then
+    readonly RED='\033[0;31m'
+    readonly GREEN='\033[0;32m'
+    readonly YELLOW='\033[1;33m'
+    readonly BLUE='\033[0;34m'
+    readonly CYAN='\033[0;36m'
+    readonly BOLD='\033[1m'
+    readonly NC='\033[0m' # No Color
+fi
 
 # Global variables (can be overridden by sourcing scripts)
 CONFIG_FILE="${CONFIG_FILE:-$(dirname "${BASH_SOURCE[0]}")/../config.yaml}"
