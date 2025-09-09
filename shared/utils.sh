@@ -3,6 +3,10 @@
 # Central location for common functions used across all scripts
 # Provides logging, YAML parsing, validation, and system utilities
 
+# Prevent multiple sourcing to avoid circular dependency issues
+[[ -n "${UTILS_SH_LOADED:-}" ]] && return 0
+readonly UTILS_SH_LOADED=1
+
 set -euo pipefail
 
 # =============================================================================
