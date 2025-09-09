@@ -3,13 +3,14 @@
 
 set -euo pipefail
 
-CONFIG_FILE_DEFAULT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../config.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE_DEFAULT="$SCRIPT_DIR/../config.yaml"
 CONFIG_FILE="$CONFIG_FILE_DEFAULT"
 PEER_NAME=""
 PUBLIC_KEY=""
 
-# Colors & logging
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+# Load shared utilities (includes colors and logging functions)
+source "$SCRIPT_DIR/../shared/utils.sh"
 log()         { echo -e "${BLUE}[DEBUG]${NC} $*"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
 log_warning() { echo -e "${YELLOW}[WARNING]${NC} $*"; }
