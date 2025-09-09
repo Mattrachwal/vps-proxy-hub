@@ -26,6 +26,11 @@ echo "First 20 lines of config file:"
 head -20 "$CONFIG_FILE"
 echo ""
 
+echo "=== Sites section from YAML ==="
+echo "Extracting sites section:"
+awk '/^sites:/,/^[a-zA-Z_]/ { print NR ": " $0 }' "$CONFIG_FILE" | head -20
+echo ""
+
 echo "=== Sites found ==="
 if command -v yq &> /dev/null; then
     echo "Using yq:"

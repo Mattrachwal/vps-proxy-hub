@@ -121,21 +121,29 @@ process_single_site() {
 extract_site_configuration() {
     local site_name="$1"
     
+    log "=== EXTRACTING SITE CONFIG FOR: $site_name ==="
+    log "Config file: $CONFIG_FILE"
+    
     # Get basic site info
     local server_names peer
     if command -v yq &> /dev/null; then
+        log "Using yq to extract site configuration..."
         server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null || echo "")
         peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE" 2>/dev/null || echo "")
+        log "yq results - server_names: '$server_names', peer: '$peer'"
         
         # If yq returns empty results, fall back to manual parsing
         if [[ -z "$server_names" || -z "$peer" ]]; then
             log "yq failed to parse config, falling back to manual parsing"
             server_names=$(extract_site_field "$site_name" "server_names")
             peer=$(extract_site_field "$site_name" "peer")
+            log "Manual parsing results - server_names: '$server_names', peer: '$peer'"
         fi
     else
+        log "yq not available, using manual parsing"
         server_names=$(extract_site_field "$site_name" "server_names")
         peer=$(extract_site_field "$site_name" "peer")
+        log "Manual parsing results - server_names: '$server_names', peer: '$peer'"
     fi
 
     # Get peer IP address
@@ -159,7 +167,9 @@ extract_site_field() {
     local site_name="$1" 
     local field="$2"
     
-    awk -v site="$site_name" -v field="$field" '
+    log "--- extract_site_field called with site='$site_name', field='$field' ---"
+    
+    local result=$(awk -v site="$site_name" -v field="$field" '
     BEGIN { in_site = 0; found = 0 }
     
     # Match site by name
@@ -214,7 +224,10 @@ extract_site_field() {
             exit
         }
     }
-    ' "$CONFIG_FILE"
+    ' "$CONFIG_FILE")
+    
+    log "--- extract_site_field result for '$field': '$result' ---"
+    echo "$result"
 }
 
 # Get peer tunnel IP address (without CIDR notation)
@@ -375,6 +388,12 @@ validate_site_configuration() {
     local upstream_host="$4" 
     local upstream_port="$5"
 
+    log "=== VALIDATING SITE CONFIG FOR: $site_name ==="
+    log "server_names: '$server_names'"
+    log "peer: '$peer'"
+    log "upstream_host: '$upstream_host'"
+    log "upstream_port: '$upstream_port'"
+
     if [[ -z "$server_names" || "$server_names" == "null" ]]; then
         log_error "No server names found for site $site_name"
         return 1
@@ -390,6 +409,7 @@ validate_site_configuration() {
         return 1
     fi
 
+    log "Site configuration validation passed for $site_name"
     return 0
 }
 
