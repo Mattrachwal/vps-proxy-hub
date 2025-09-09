@@ -268,6 +268,9 @@ extract_upstream_configuration() {
         port=$(extract_upstream_field "$site_name" "port")
     fi
 
+    # Debug logging
+    log_debug "Site: $site_name, Peer IP: $peer_ip, Docker: $is_docker, Port: $port, Container Port: $container_port"
+
     if [[ "$is_docker" == "true" ]]; then
         if [[ -n "$container_port" && "$container_port" != "null" ]]; then
             echo "${peer_ip}|${container_port}"
@@ -279,7 +282,8 @@ extract_upstream_configuration() {
         if [[ -n "$port" && "$port" != "null" ]]; then
             echo "${peer_ip}|${port}"
         else
-            log_error "Port not specified for site $site_name"
+            log_error "Port not specified for site $site_name (found: '$port')"
+            log_error "Please check the upstream.port configuration in your config file"
             return 1
         fi
     fi
