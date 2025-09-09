@@ -5,9 +5,8 @@
 
 set -euo pipefail
 
-# Source shared utilities
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/utils.sh"
+# Source shared utilities (use absolute path to avoid SCRIPT_DIR conflicts)
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/utils.sh"
 
 # =============================================================================
 # INPUT VALIDATION FUNCTIONS

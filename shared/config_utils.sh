@@ -5,9 +5,8 @@
 
 set -euo pipefail
 
-# Source core utilities
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/utils.sh"
+# Source core utilities (use absolute path to avoid SCRIPT_DIR conflicts)
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/utils.sh"
 
 # =============================================================================
 # COMPUTED CONFIGURATION VALUES
