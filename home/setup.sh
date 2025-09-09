@@ -6,6 +6,7 @@ set -euo pipefail
 
 # Script configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SETUP_SCRIPT_DIR="$SCRIPT_DIR"  # Preserve the original script directory
 CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/../config.yaml}"
 PEER_NAME=""
 
@@ -161,7 +162,7 @@ run_setup_script() {
     local step_num="$1"
     local step_name="$2"
     local script_name="$3"
-    local script_path="$SCRIPT_DIR/scripts/$script_name"
+    local script_path="$SETUP_SCRIPT_DIR/scripts/$script_name"
     
     if should_skip_step "$step_num"; then
         log_warning "Skipping step $step_num: $step_name"
