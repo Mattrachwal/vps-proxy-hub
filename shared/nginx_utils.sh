@@ -61,7 +61,7 @@ remove_existing_vhosts() {
 get_all_site_names() {
     local site_names=""
     if command -v yq &> /dev/null; then
-        site_names=$(yq eval '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null || echo "")
+        site_names=$(yq eval -o json '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
         
         # If yq fails or returns empty, use fallback parsing
         if [[ -z "$site_names" ]]; then
@@ -123,13 +123,15 @@ extract_site_configuration() {
     
     log "=== EXTRACTING SITE CONFIG FOR: $site_name ==="
     log "Config file: $CONFIG_FILE"
+    log "Config file exists: $(ls -la "$CONFIG_FILE" 2>&1)"
+    log "Current working directory: $(pwd)"
     
     # Get basic site info
     local server_names peer
     if command -v yq &> /dev/null; then
         log "Using yq to extract site configuration..."
-        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null || echo "")
-        peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE" 2>/dev/null || echo "")
+        server_names=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
+        peer=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
         log "yq results - server_names: '$server_names', peer: '$peer'"
         
         # If yq returns empty results, fall back to manual parsing
@@ -296,9 +298,9 @@ extract_upstream_configuration() {
     local is_docker container_port port
     
     if command -v yq &> /dev/null; then
-        is_docker=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE" 2>/dev/null || echo "false")
-        container_port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_port" "$CONFIG_FILE" 2>/dev/null || echo "")
-        port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.port" "$CONFIG_FILE" 2>/dev/null || echo "")
+        is_docker=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "false")
+        container_port=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .upstream.container_port" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
+        port=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .upstream.port" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
         
         # If yq returns null/empty values, fall back to manual parsing
         if [[ "$is_docker" == "null" || "$port" == "null" ]]; then

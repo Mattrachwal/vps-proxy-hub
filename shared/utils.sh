@@ -35,32 +35,32 @@ LOG_FILE="${LOG_FILE:-/var/log/vps-proxy-hub.log}"
 # Log informational messages
 log() {
     local prefix="${LOG_PREFIX:-[INFO]}"
-    echo -e "${BLUE}${prefix}${NC} $*" | tee -a "$LOG_FILE"
+    echo -e "${BLUE}${prefix}${NC} $*" | tee -a "$LOG_FILE" >&2
 }
 
 # Log success messages
 log_success() {
     local prefix="${LOG_PREFIX:-[SUCCESS]}"
-    echo -e "${GREEN}${prefix}${NC} $*" | tee -a "$LOG_FILE"
+    echo -e "${GREEN}${prefix}${NC} $*" | tee -a "$LOG_FILE" >&2
 }
 
 # Log warning messages
 log_warning() {
     local prefix="${LOG_PREFIX:-[WARNING]}"
-    echo -e "${YELLOW}${prefix}${NC} $*" | tee -a "$LOG_FILE"
+    echo -e "${YELLOW}${prefix}${NC} $*" | tee -a "$LOG_FILE" >&2
 }
 
 # Log error messages
 log_error() {
     local prefix="${LOG_PREFIX:-[ERROR]}"
-    echo -e "${RED}${prefix}${NC} $*" | tee -a "$LOG_FILE"
+    echo -e "${RED}${prefix}${NC} $*" | tee -a "$LOG_FILE" >&2
 }
 
 # Log debug messages (only shown if DEBUG=1)
 log_debug() {
     if [[ "${DEBUG:-0}" == "1" ]]; then
         local prefix="${LOG_PREFIX:-[DEBUG]}"
-        echo -e "${BLUE}${prefix}${NC} $*" | tee -a "$LOG_FILE"
+        echo -e "${BLUE}${prefix}${NC} $*" | tee -a "$LOG_FILE" >&2
     fi
 }
 
