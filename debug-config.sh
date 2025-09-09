@@ -13,10 +13,28 @@ echo "=== Testing config parsing ==="
 echo "Config file: $CONFIG_FILE"
 echo ""
 
+echo "=== yq version ==="
+yq --version || echo "yq not found or error"
+echo ""
+
+echo "=== YAML syntax check ==="
+yq eval '.' "$CONFIG_FILE" >/dev/null 2>&1 && echo "YAML syntax OK" || echo "YAML syntax ERROR"
+echo ""
+
+echo "=== Raw file structure ==="
+echo "First 20 lines of config file:"
+head -20 "$CONFIG_FILE"
+echo ""
+
 echo "=== Sites found ==="
 if command -v yq &> /dev/null; then
     echo "Using yq:"
-    yq eval '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null || echo "No sites found with yq"
+    echo "yq command: yq eval '.sites[] | .name' \"$CONFIG_FILE\""
+    yq eval '.sites[] | .name' "$CONFIG_FILE" || echo "yq failed with error code: $?"
+    
+    echo ""
+    echo "Testing alternative yq syntax:"
+    yq '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null || echo "Alternative yq syntax also failed"
 else
     echo "Using fallback parser:"
     awk '/^sites:/,/^[a-zA-Z_]/ {

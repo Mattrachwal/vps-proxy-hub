@@ -59,18 +59,33 @@ remove_existing_vhosts() {
 
 # Get all site names from configuration
 get_all_site_names() {
+    local site_names=""
     if command -v yq &> /dev/null; then
-        yq eval '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null || echo ""
+        site_names=$(yq eval '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null || echo "")
+        
+        # If yq fails or returns empty, use fallback parsing
+        if [[ -z "$site_names" ]]; then
+            log "yq failed to get site names, using fallback parsing"
+            site_names=$(awk '/^sites:/,/^[a-zA-Z_]/ {
+                if (/^\s*-\s*name:/) {
+                    gsub(/^\s*-\s*name:\s*["'"'"']?/, "")
+                    gsub(/["'"'"'].*$/, "")
+                    if (length($0) > 0) print $0
+                }
+            }' "$CONFIG_FILE")
+        fi
     else
         # Basic parsing fallback
-        awk '/^sites:/,/^[a-zA-Z_]/ {
+        site_names=$(awk '/^sites:/,/^[a-zA-Z_]/ {
             if (/^\s*-\s*name:/) {
                 gsub(/^\s*-\s*name:\s*["'"'"']?/, "")
                 gsub(/["'"'"'].*$/, "")
                 if (length($0) > 0) print $0
             }
-        }' "$CONFIG_FILE"
+        }' "$CONFIG_FILE")
     fi
+    
+    echo "$site_names"
 }
 
 # Process a single site configuration
@@ -111,6 +126,13 @@ extract_site_configuration() {
     if command -v yq &> /dev/null; then
         server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null || echo "")
         peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE" 2>/dev/null || echo "")
+        
+        # If yq returns empty results, fall back to manual parsing
+        if [[ -z "$server_names" || -z "$peer" ]]; then
+            log "yq failed to parse config, falling back to manual parsing"
+            server_names=$(extract_site_field "$site_name" "server_names")
+            peer=$(extract_site_field "$site_name" "peer")
+        fi
     else
         server_names=$(extract_site_field "$site_name" "server_names")
         peer=$(extract_site_field "$site_name" "peer")
@@ -264,6 +286,14 @@ extract_upstream_configuration() {
         is_docker=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE" 2>/dev/null || echo "false")
         container_port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_port" "$CONFIG_FILE" 2>/dev/null || echo "")
         port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.port" "$CONFIG_FILE" 2>/dev/null || echo "")
+        
+        # If yq returns null/empty values, fall back to manual parsing
+        if [[ "$is_docker" == "null" || "$port" == "null" ]]; then
+            log "yq returned null values, falling back to manual parsing"
+            is_docker=$(extract_upstream_field "$site_name" "docker")
+            container_port=$(extract_upstream_field "$site_name" "container_port")
+            port=$(extract_upstream_field "$site_name" "port")
+        fi
     else
         is_docker=$(extract_upstream_field "$site_name" "docker")
         container_port=$(extract_upstream_field "$site_name" "container_port")
