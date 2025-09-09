@@ -174,7 +174,7 @@ extract_site_field() {
     }
     
     # Exit current site when we hit another site or top-level key
-    in_site && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !/^\s*-\s*name:.*'"$site_name"'/ {
+    in_site && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !($0 ~ site) {
         in_site = 0
     }
     
@@ -208,8 +208,8 @@ extract_site_field() {
             }
         } else {
             # Extract simple value
-            gsub(/.*'"$field"':\s*["'"'"']?/, "")
-            gsub(/["'"'"'].*$/, "")
+            sub(".*" field ":[[:space:]]*[\"'"'"']?", "")
+            sub("[\"'"'"'].*$", "")
             print
             exit
         }
@@ -347,20 +347,20 @@ extract_upstream_field() {
     }
     
     # Exit upstream section
-    in_upstream && /^\s*[a-zA-Z_]+:/ && !/^\s+/ && !/'$field':/ {
+    in_upstream && /^\s*[a-zA-Z_]+:/ && !/^\s+/ && !($0 ~ field ":") {
         in_upstream = 0
     }
     
     # Exit site
-    in_site && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !/^\s*-\s*name:.*'"$site_name"'/ {
+    in_site && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !($0 ~ site) {
         in_site = 0
         in_upstream = 0
     }
     
     # Extract value from upstream section
     in_upstream && $0 ~ field {
-        gsub(/.*'"$field"':\s*["'"'"']?/, "")
-        gsub(/["'"'"'].*$/, "")
+        sub(".*" field ":[[:space:]]*[\"'"'"']?", "")
+        sub("[\"'"'"'].*$", "")
         print
         exit
     }
