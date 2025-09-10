@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-# Source core utilities (use absolute path to avoid SCRIPT_DIR conflicts)
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/utils.sh"
+# Prevent circular dependency - don't source utils.sh here since utils.sh sources this file
+# These functions will be available once utils.sh finishes loading
 
 # =============================================================================
 # COMPUTED CONFIGURATION VALUES
@@ -224,8 +224,6 @@ validate_site_config() {
     log_success "Site '$site_name' configuration is valid"
     return 0
 }
-
-# Migration functions removed since starting fresh with v2 format
 
 # =============================================================================
 # CONFIGURATION DISPLAY

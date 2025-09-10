@@ -60,29 +60,28 @@ remove_existing_vhosts() {
 # Get all site names from configuration
 get_all_site_names() {
     local site_names=""
+    
     if command -v yq &> /dev/null; then
-        site_names=$(yq eval -o json '.sites[] | .name' "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
+        # Use yq to extract site names as separate lines
+        site_names=$(yq eval '.sites[].name' "$CONFIG_FILE" 2>/dev/null || echo "")
+    fi
+    
+    # If yq fails or returns empty, use fallback parsing
+    if [[ -z "$site_names" ]]; then
+        log_debug "yq failed to get site names, using fallback parsing"
+        site_names=$(awk '
+        BEGIN { in_sites = 0 }
         
-        # If yq fails or returns empty, use fallback parsing
-        if [[ -z "$site_names" ]]; then
-            log "yq failed to get site names, using fallback parsing"
-            site_names=$(awk '/^sites:/,/^[a-zA-Z_]/ {
-                if (/^\s*-\s*name:/) {
-                    gsub(/^\s*-\s*name:\s*["'"'"']?/, "")
-                    gsub(/["'"'"'].*$/, "")
-                    if (length($0) > 0) print $0
-                }
-            }' "$CONFIG_FILE")
-        fi
-    else
-        # Basic parsing fallback
-        site_names=$(awk '/^sites:/,/^[a-zA-Z_]/ {
-            if (/^\s*-\s*name:/) {
-                gsub(/^\s*-\s*name:\s*["'"'"']?/, "")
-                gsub(/["'"'"'].*$/, "")
-                if (length($0) > 0) print $0
-            }
-        }' "$CONFIG_FILE")
+        /^sites:/ { in_sites = 1; next }
+        
+        in_sites && /^[a-zA-Z_]/ && !/^[[:space:]]/ { in_sites = 0 }
+        
+        in_sites && /^[[:space:]]*-[[:space:]]*name:/ {
+            gsub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "")
+            gsub(/^["'"'"']|["'"'"']$/, "")
+            if (length($0) > 0) print $0
+        }
+        ' "$CONFIG_FILE")
     fi
     
     echo "$site_names"
@@ -121,38 +120,25 @@ process_single_site() {
 extract_site_configuration() {
     local site_name="$1"
     
-    log "=== EXTRACTING SITE CONFIG FOR: $site_name ==="
-    log "Config file: $CONFIG_FILE"
-    log "Config file exists: $(ls -la "$CONFIG_FILE" 2>&1)"
-    log "Current working directory: $(pwd)"
+    log_debug "Extracting site config for: $site_name"
     
     # Get basic site info
     local server_names peer
     if command -v yq &> /dev/null; then
-        log "Using yq to extract site configuration..."
-        server_names=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
-        peer=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
-        log "yq results - server_names: '$server_names', peer: '$peer'"
-        
-        # If yq returns empty results, fall back to manual parsing
-        if [[ -z "$server_names" || -z "$peer" ]]; then
-            log "yq failed to parse config, falling back to manual parsing"
-            server_names=$(extract_site_field "$site_name" "server_names")
-            peer=$(extract_site_field "$site_name" "peer")
-            log "Manual parsing results - server_names: '$server_names', peer: '$peer'"
-        fi
-    else
-        log "yq not available, using manual parsing"
+        server_names=$(yq eval ".sites[] | select(.name == \"$site_name\") | .server_names | join(\" \")" "$CONFIG_FILE" 2>/dev/null || echo "")
+        peer=$(yq eval ".sites[] | select(.name == \"$site_name\") | .peer" "$CONFIG_FILE" 2>/dev/null || echo "")
+    fi
+    
+    # If yq returns empty results, fall back to manual parsing
+    if [[ -z "$server_names" || -z "$peer" || "$server_names" == "null" || "$peer" == "null" ]]; then
+        log_debug "yq failed to parse config, falling back to manual parsing"
         server_names=$(extract_site_field "$site_name" "server_names")
         peer=$(extract_site_field "$site_name" "peer")
-        log "Manual parsing results - server_names: '$server_names', peer: '$peer'"
     fi
 
     # Get peer IP address
     local peer_ip
-    log "Debug: Looking up tunnel IP for peer: $peer"
     peer_ip=$(get_peer_tunnel_ip "$peer") || return 1
-    log "Debug: Found peer IP: $peer_ip"
 
     # Determine upstream configuration
     local upstream_config
@@ -169,24 +155,27 @@ extract_site_field() {
     local site_name="$1" 
     local field="$2"
     
-    log "--- extract_site_field called with site='$site_name', field='$field' ---"
+    awk -v site="$site_name" -v field="$field" '
+    BEGIN { in_sites = 0; in_site = 0 }
     
-    local result=$(awk -v site="$site_name" -v field="$field" '
-    BEGIN { in_site = 0; found = 0 }
+    # Enter sites section
+    /^sites:/ { in_sites = 1; next }
     
-    # Match site by name
-    /^\s*-\s*name:/ {
+    # Exit sites section
+    in_sites && /^[a-zA-Z_]/ && !/^[[:space:]]/ { in_sites = 0; in_site = 0 }
+    
+    # Match site by name within sites section
+    in_sites && /^[[:space:]]*-[[:space:]]*name:/ {
         if ($0 ~ site) {
             in_site = 1
-            found = 1
             next
         } else {
             in_site = 0
         }
     }
     
-    # Exit current site when we hit another site or top-level key
-    in_site && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !($0 ~ site) {
+    # Exit current site when we hit another site
+    in_site && /^[[:space:]]*-[[:space:]]*name:/ && !($0 ~ site) {
         in_site = 0
     }
     
@@ -198,49 +187,43 @@ extract_site_field() {
                 gsub(/.*\[/, "")
                 gsub(/\].*/, "")
                 gsub(/["'"'"',]/, " ")
-                gsub(/\s+/, " ")
-                gsub(/^\s+|\s+$/, "")
+                gsub(/[[:space:]]+/, " ")
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "")
                 print
                 exit
             } else {
                 # Look for array items on following lines
                 values = ""
-                getline
-                while ($0 ~ /^\s*-/ || $0 ~ /^\s+"/) {
-                    gsub(/^\s*-\s*["'"'"']?/, "")
-                    gsub(/["'"'"'].*$/, "")
-                    if (length($0) > 0) {
-                        if (values) values = values " " $0
-                        else values = $0
+                while ((getline next_line) > 0) {
+                    if (next_line ~ /^[[:space:]]*-[[:space:]]*["'"'"']/) {
+                        gsub(/^[[:space:]]*-[[:space:]]*["'"'"']?/, "", next_line)
+                        gsub(/["'"'"'].*$/, "", next_line)
+                        if (length(next_line) > 0) {
+                            if (values) values = values " " next_line
+                            else values = next_line
+                        }
+                    } else if (next_line ~ /^[[:space:]]*[a-zA-Z_]/ || next_line ~ /^[[:space:]]*-[[:space:]]*name:/) {
+                        # End of array, push back the line
+                        break
                     }
-                    if ((getline) <= 0) break
                 }
                 print values
                 exit
             }
         } else {
             # Extract simple value
-            sub(".*" field ":[[:space:]]*[\"'"'"']?", "")
-            sub("[\"'"'"'].*$", "")
+            gsub(".*" field ":[[:space:]]*[\"'"'"']?", "")
+            gsub("[\"'"'"'].*$", "")
             print
             exit
         }
     }
-    ' "$CONFIG_FILE")
-    
-    log "--- extract_site_field result for '$field': '$result' ---"
-    echo "$result"
+    ' "$CONFIG_FILE"
 }
 
 # Get peer tunnel IP address (without CIDR notation)
-# Uses improved config utilities for better error handling
 get_peer_tunnel_ip() {
     local peer_name="$1"
-    
-    # First validate the peer exists
-    if ! validate_peer_config "$peer_name"; then
-        return 1
-    fi
     
     local address
     address=$(get_peer_config "$peer_name" "address")
@@ -254,41 +237,6 @@ get_peer_tunnel_ip() {
     fi
 }
 
-# Extract peer field using fallback parser
-extract_peer_field() {
-    local peer_name="$1"
-    local field="$2"
-    
-    awk -v peer="$peer_name" -v field="$field" '
-    BEGIN { in_peer = 0 }
-    
-    # Match peer by name
-    /^\s*-\s*name:/ {
-        if ($0 ~ peer) {
-            in_peer = 1
-            next
-        } else {
-            in_peer = 0
-        }
-    }
-    
-    # Exit current peer when we hit another peer or top-level key
-    in_peer && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !/^\s*-\s*name:.*'"$peer_name"'/ {
-        in_peer = 0
-    }
-    
-    # Extract the field value
-    in_peer && $0 ~ field {
-        gsub(/.*'"$field"':\s*["'"'"']?/, "")
-        gsub(/["'"'"'].*$/, "")
-        if (length($0) > 0) {
-            print
-            exit
-        }
-    }
-    ' "$CONFIG_FILE"
-}
-
 # Determine upstream configuration (Docker or direct port)
 # Returns: "upstream_host|upstream_port"
 extract_upstream_configuration() {
@@ -298,13 +246,12 @@ extract_upstream_configuration() {
     local is_docker container_port port
     
     if command -v yq &> /dev/null; then
-        is_docker=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "false")
-        container_port=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .upstream.container_port" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
-        port=$(yq eval -o json ".sites[] | select(.name == \"$site_name\") | .upstream.port" "$CONFIG_FILE" 2>/dev/null | sed 's/"//g' || echo "")
+        is_docker=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.docker" "$CONFIG_FILE" 2>/dev/null || echo "false")
+        container_port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.container_port" "$CONFIG_FILE" 2>/dev/null || echo "")
+        port=$(yq eval ".sites[] | select(.name == \"$site_name\") | .upstream.port" "$CONFIG_FILE" 2>/dev/null || echo "")
         
         # If yq returns null/empty values, fall back to manual parsing
         if [[ "$is_docker" == "null" || "$port" == "null" ]]; then
-            log "yq returned null values, falling back to manual parsing"
             is_docker=$(extract_upstream_field "$site_name" "docker")
             container_port=$(extract_upstream_field "$site_name" "container_port")
             port=$(extract_upstream_field "$site_name" "port")
@@ -316,7 +263,7 @@ extract_upstream_configuration() {
     fi
 
     # Debug logging  
-    log "Debug: Site: $site_name, Peer IP: $peer_ip, Docker: $is_docker, Port: '$port', Container Port: '$container_port'"
+    log_debug "Site: $site_name, Peer IP: $peer_ip, Docker: $is_docker, Port: '$port', Container Port: '$container_port'"
 
     if [[ "$is_docker" == "true" ]]; then
         if [[ -n "$container_port" && "$container_port" != "null" ]]; then
@@ -342,10 +289,16 @@ extract_upstream_field() {
     local field="$2"
     
     awk -v site="$site_name" -v field="$field" '
-    BEGIN { in_site = 0; in_upstream = 0 }
+    BEGIN { in_sites = 0; in_site = 0; in_upstream = 0 }
     
-    # Match site by name
-    /^\s*-\s*name:/ {
+    # Enter sites section
+    /^sites:/ { in_sites = 1; next }
+    
+    # Exit sites section
+    in_sites && /^[a-zA-Z_]/ && !/^[[:space:]]/ { in_sites = 0; in_site = 0; in_upstream = 0 }
+    
+    # Match site by name within sites section
+    in_sites && /^[[:space:]]*-[[:space:]]*name:/ {
         if ($0 ~ site) {
             in_site = 1
             next
@@ -356,26 +309,25 @@ extract_upstream_field() {
     }
     
     # Enter upstream section
-    in_site && /upstream:/ {
+    in_site && /^[[:space:]]*upstream:/ {
         in_upstream = 1
         next
     }
     
-    # Exit upstream section
-    in_upstream && /^\s*[a-zA-Z_]+:/ && !/^\s+/ && !($0 ~ field ":") {
+    # Exit upstream section or site
+    in_upstream && (/^[[:space:]]*[a-zA-Z_]+:/ && !/^[[:space:]]+/ && !($0 ~ field ":")) {
         in_upstream = 0
     }
     
-    # Exit site
-    in_site && (/^\s*-\s*name:/ || /^[a-zA-Z_]/) && !($0 ~ site) {
+    in_site && /^[[:space:]]*-[[:space:]]*name:/ && !($0 ~ site) {
         in_site = 0
         in_upstream = 0
     }
     
     # Extract value from upstream section
     in_upstream && $0 ~ field {
-        sub(".*" field ":[[:space:]]*[\"'"'"']?", "")
-        sub("[\"'"'"'].*$", "")
+        gsub(".*" field ":[[:space:]]*[\"'"'"']?", "")
+        gsub("[\"'"'"'].*$", "")
         print
         exit
     }
@@ -390,11 +342,11 @@ validate_site_configuration() {
     local upstream_host="$4" 
     local upstream_port="$5"
 
-    log "=== VALIDATING SITE CONFIG FOR: $site_name ==="
-    log "server_names: '$server_names'"
-    log "peer: '$peer'"
-    log "upstream_host: '$upstream_host'"
-    log "upstream_port: '$upstream_port'"
+    log_debug "Validating site config for: $site_name"
+    log_debug "server_names: '$server_names'"
+    log_debug "peer: '$peer'"
+    log_debug "upstream_host: '$upstream_host'"
+    log_debug "upstream_port: '$upstream_port'"
 
     if [[ -z "$server_names" || "$server_names" == "null" ]]; then
         log_error "No server names found for site $site_name"
@@ -411,7 +363,7 @@ validate_site_configuration() {
         return 1
     fi
 
-    log "Site configuration validation passed for $site_name"
+    log_debug "Site configuration validation passed for $site_name"
     return 0
 }
 

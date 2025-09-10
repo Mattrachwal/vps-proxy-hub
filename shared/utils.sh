@@ -116,16 +116,78 @@ install_yq() {
 get_config_value() {
     local key="$1"
     local default="${2:-}"
+    local result=""
     
     if command -v yq &> /dev/null; then
-        yq eval ".$key" "$CONFIG_FILE" 2>/dev/null || echo "$default"
+        result=$(yq eval ".$key" "$CONFIG_FILE" 2>/dev/null || echo "")
+        # Handle yq returning "null" string
+        if [[ "$result" == "null" || -z "$result" ]]; then
+            result="$default"
+        fi
     else
-        # Basic YAML parsing fallback for simple key paths
-        local value
-        value=$(grep -E "^\s*${key##*.}:" "$CONFIG_FILE" | head -1 | \
-               sed 's/.*:\s*//' | sed 's/["'\'']//g' || echo "$default")
-        echo "$value"
+        # Improved basic YAML parsing
+        result=$(parse_yaml_key "$key" "$default")
     fi
+    
+    echo "$result"
+}
+
+# Basic YAML key parsing (fallback when yq not available)
+parse_yaml_key() {
+    local key="$1"
+    local default="$2"
+    local result=""
+    
+    # Handle nested keys (e.g., "vps.public_ip")
+    if [[ "$key" =~ \. ]]; then
+        local parent_key="${key%%.*}"
+        local child_key="${key#*.}"
+        
+        # Find the parent section and extract child value
+        result=$(awk -v parent="$parent_key" -v child="$child_key" '
+        BEGIN { in_section = 0 }
+        
+        # Match parent section
+        /^[a-zA-Z_][a-zA-Z0-9_]*:/ {
+            if ($1 == parent ":") {
+                in_section = 1
+                next
+            } else {
+                in_section = 0
+            }
+        }
+        
+        # Exit section when we hit another top-level key
+        in_section && /^[a-zA-Z_]/ && !/^[[:space:]]/ {
+            in_section = 0
+        }
+        
+        # Extract value from within section
+        in_section && $0 ~ "^[[:space:]]*" child ":" {
+            gsub("^[[:space:]]*" child ":[[:space:]]*", "")
+            gsub(/^["'"'"']|["'"'"']$/, "")
+            print
+            exit
+        }
+        ' "$CONFIG_FILE")
+    else
+        # Simple top-level key
+        result=$(awk -v key="$key" '
+        /^[[:space:]]*'"$key"':[[:space:]]*/ {
+            gsub("^[[:space:]]*'"$key"':[[:space:]]*", "")
+            gsub(/^["'"'"']|["'"'"']$/, "")
+            print
+            exit
+        }
+        ' "$CONFIG_FILE")
+    fi
+    
+    # Return default if empty
+    if [[ -z "$result" ]]; then
+        result="$default"
+    fi
+    
+    echo "$result"
 }
 
 # Get array values from YAML configuration
@@ -134,13 +196,13 @@ get_config_array() {
     local key="$1"
     
     if command -v yq &> /dev/null; then
-        yq eval ".$key[]" "$CONFIG_FILE" 2>/dev/null
+        yq eval ".$key[]" "$CONFIG_FILE" 2>/dev/null | grep -v "^null$" || true
     else
         # Basic array parsing - assumes simple YAML format
-        grep -A 10 "^$key:" "$CONFIG_FILE" | \
+        grep -A 20 "^$key:" "$CONFIG_FILE" | \
             grep "^\s*-" | \
             sed 's/^\s*-\s*//' | \
-            sed 's/["'\'']//g'
+            sed 's/["'"'"']//g' || true
     fi
 }
 
@@ -150,20 +212,63 @@ get_peer_config() {
     local peer_name="$1"
     local key="$2"
     local default="${3:-}"
+    local result=""
     
     if command -v yq &> /dev/null; then
-        yq eval ".peers[] | select(.name == \"$peer_name\") | .$key" "$CONFIG_FILE" 2>/dev/null || echo "$default"
+        result=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .$key" "$CONFIG_FILE" 2>/dev/null || echo "")
+        if [[ "$result" == "null" || -z "$result" ]]; then
+            result="$default"
+        fi
     else
-        # Basic parsing - find peer section and extract key
-        awk "/name:.*\"?${peer_name}\"?/,/^[[:space:]]*-[[:space:]]*name:|^[^[:space:]]/ {
-            if (/${key}:/) {
-                gsub(/.*${key}:[[:space:]]*[\"']?/, \"\")
-                gsub(/[\"'].*/, \"\")
-                print \$0
-                exit
-            }
-        }" "$CONFIG_FILE" || echo "$default"
+        # Improved peer parsing
+        result=$(parse_peer_config "$peer_name" "$key" "$default")
     fi
+    
+    echo "$result"
+}
+
+# Parse peer configuration (fallback method)
+parse_peer_config() {
+    local peer_name="$1"
+    local key="$2"
+    local default="$3"
+    
+    awk -v peer="$peer_name" -v key="$key" -v def="$default" '
+    BEGIN { in_peer = 0; in_peers = 0 }
+    
+    # Enter peers section
+    /^peers:/ { in_peers = 1; next }
+    
+    # Exit peers section
+    in_peers && /^[a-zA-Z_]/ && !/^[[:space:]]/ { in_peers = 0 }
+    
+    # Match peer by name within peers section
+    in_peers && /^[[:space:]]*-[[:space:]]*name:/ {
+        if ($0 ~ peer) {
+            in_peer = 1
+            next
+        } else {
+            in_peer = 0
+        }
+    }
+    
+    # Exit current peer when we hit another peer or end of peers
+    in_peer && (/^[[:space:]]*-[[:space:]]*name:/ || (/^[a-zA-Z_]/ && !/^[[:space:]]/)) {
+        in_peer = 0
+    }
+    
+    # Extract the key value
+    in_peer && $0 ~ "^[[:space:]]*" key ":" {
+        gsub("^[[:space:]]*" key ":[[:space:]]*", "")
+        gsub(/^["'"'"']|["'"'"']$/, "")
+        if (length($0) > 0) {
+            print
+            exit
+        }
+    }
+    
+    END { if (!found) print def }
+    ' "$CONFIG_FILE"
 }
 
 # Validate that a peer name exists in configuration
@@ -172,9 +277,12 @@ validate_peer_name() {
     local peer_name="$1"
     
     if command -v yq &> /dev/null; then
-        yq eval ".peers[] | select(.name == \"$peer_name\") | .name" "$CONFIG_FILE" 2>/dev/null | grep -q "$peer_name"
+        local found
+        found=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .name" "$CONFIG_FILE" 2>/dev/null || echo "")
+        [[ "$found" == "$peer_name" ]]
     else
-        grep -q "name:.*\"\\?${peer_name}\"\\?" "$CONFIG_FILE"
+        # Check if peer exists in config
+        grep -A 5 "^peers:" "$CONFIG_FILE" | grep -q "name:.*[\"']\?${peer_name}[\"']\?"
     fi
 }
 
@@ -387,13 +495,13 @@ display_peer_info() {
         echo ""
         log_success "Home machine '$peer_name' setup completed!"
         echo ""
-        echo "═══════════════════════════════════════════════════════════════════"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "COPY THE FOLLOWING COMMAND TO RUN ON YOUR VPS:"
-        echo "═══════════════════════════════════════════════════════════════════"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo ""
         echo "add-peer-key $peer_name '$public_key'"
         echo ""
-        echo "═══════════════════════════════════════════════════════════════════"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo ""
         log "After running the command on the VPS, WireGuard will restart"
         log "and this peer will be able to connect to the tunnel."
@@ -405,9 +513,6 @@ display_peer_info() {
 # =============================================================================
 # INITIALIZATION
 # =============================================================================
-
-# Load configuration utilities for enhanced config handling
-source "$(dirname "${BASH_SOURCE[0]}")/config_utils.sh"
 
 # Log that utilities have been loaded
 log_debug "Shared utilities loaded successfully"
