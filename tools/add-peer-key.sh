@@ -12,56 +12,7 @@ PUBLIC_KEY=""
 
 # Load shared utilities
 source "$SCRIPT_DIR/../shared/utils.sh"
-
-# Add peer to configuration (same function as VPS setup)
-add_peer_to_config() {
-    local config_path="$1"
-    local peer_name="$2"
-    local peers_dir="$3"
-    
-    if [[ -z "$peer_name" ]]; then
-        return 0
-    fi
-    
-    log "Processing peer: $peer_name"
-    
-    # Get peer configuration
-    local peer_address peer_keepalive public_key_file
-    
-    if command -v yq &> /dev/null; then
-        peer_address=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .address" "$CONFIG_FILE")
-        peer_keepalive=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .keepalive" "$CONFIG_FILE")
-    else
-        # Basic parsing - find peer section and extract values
-        peer_address=$(awk "/name:.*$peer_name/,/^[[:space:]]*-|^[^[:space:]]/ { if(/address:/) print \$2 }" "$CONFIG_FILE" | tr -d '"'"'" | head -1)
-        peer_keepalive=$(awk "/name:.*$peer_name/,/^[[:space:]]*-|^[^[:space:]]/ { if(/keepalive:/) print \$2 }" "$CONFIG_FILE" | head -1)
-    fi
-    
-    # Set defaults if not specified
-    peer_keepalive=${peer_keepalive:-25}
-    
-    # Look for peer public key file
-    public_key_file="$peers_dir/${peer_name}.pub"
-    
-    if [[ -f "$public_key_file" ]]; then
-        local public_key
-        public_key=$(cat "$public_key_file")
-        
-        # Add peer section to config
-        cat >> "$config_path" << EOF
-
-# Peer: $peer_name
-[Peer]
-PublicKey = $public_key
-AllowedIPs = $peer_address
-PersistentKeepalive = $peer_keepalive
-
-EOF
-        log "Added peer $peer_name to configuration"
-    else
-        log_warning "Public key not found for peer $peer_name: $public_key_file"
-    fi
-}
+source "$SCRIPT_DIR/../shared/wireguard_utils.sh"
 
 # Parse args
 if [[ $# -ne 2 ]]; then

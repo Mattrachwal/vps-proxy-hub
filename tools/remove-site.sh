@@ -11,22 +11,8 @@ CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/../config.yaml}"
 # Load shared utilities (includes colors and logging functions)
 source "$SCRIPT_DIR/../shared/utils.sh"
 
-# Logging functions
-log() {
-    echo -e "${BLUE}[REMOVE-SITE]${NC} $*"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $*"
-}
+# Set logging prefix for this script
+export LOG_PREFIX="[REMOVE-SITE]"
 
 # Show usage information
 show_usage() {

@@ -16,7 +16,7 @@ CHECK_MARK="✓"
 CROSS_MARK="✗"
 WARNING_MARK="⚠"
 
-# Logging functions
+# Override log functions to use status symbols (intentional customization)
 log() {
     echo -e "${BLUE}$*${NC}"
 }

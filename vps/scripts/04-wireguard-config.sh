@@ -6,7 +6,8 @@ set -euo pipefail
 
 # Load utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/utils.sh"
+source "$SCRIPT_DIR/../../shared/utils.sh"
+source "$SCRIPT_DIR/../../shared/wireguard_utils.sh"
 
 main() {
     log "Starting WireGuard configuration..."
@@ -105,90 +106,9 @@ PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACC
 EOF
     
     # Add peers from configuration
-    add_peers_to_config "$config_path" "$peers_dir"
+    add_all_peers_to_config "$config_path" "$peers_dir"
 }
 
-add_peers_to_config() {
-    local config_path="$1"
-    local peers_dir="$2"
-    
-    log "Adding peers to WireGuard configuration..."
-    
-    # Get peers from config file
-    if command -v yq &> /dev/null; then
-        yq eval '.peers[] | .name' "$CONFIG_FILE" | while IFS= read -r peer_name; do
-            add_peer_to_config "$config_path" "$peer_name" "$peers_dir"
-        done
-    else
-        # Basic parsing for peer names
-        grep -A 20 "^peers:" "$CONFIG_FILE" | grep "name:" | sed 's/.*name: *["'\'']*//' | sed 's/["'\'']*.*//' | while IFS= read -r peer_name; do
-            if [[ -n "$peer_name" ]]; then
-                add_peer_to_config "$config_path" "$peer_name" "$peers_dir"
-            fi
-        done
-    fi
-}
-
-add_peer_to_config() {
-    local config_path="$1"
-    local peer_name="$2"
-    local peers_dir="$3"
-    
-    if [[ -z "$peer_name" ]]; then
-        return 0
-    fi
-    
-    log "Processing peer: $peer_name"
-    
-    # Get peer configuration
-    local peer_address peer_keepalive public_key_file
-    
-    if command -v yq &> /dev/null; then
-        peer_address=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .address" "$CONFIG_FILE")
-        peer_keepalive=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .keepalive" "$CONFIG_FILE")
-    else
-        # Basic parsing - find peer section and extract values
-        peer_address=$(awk "/name:.*$peer_name/,/^[[:space:]]*-|^[^[:space:]]/ { if(/address:/) print \$2 }" "$CONFIG_FILE" | tr -d '"'"'" | head -1)
-        peer_keepalive=$(awk "/name:.*$peer_name/,/^[[:space:]]*-|^[^[:space:]]/ { if(/keepalive:/) print \$2 }" "$CONFIG_FILE" | head -1)
-    fi
-    
-    # Set defaults if not specified
-    peer_keepalive=${peer_keepalive:-25}
-    
-    # Look for peer public key file
-    public_key_file="$peers_dir/${peer_name}.pub"
-    
-    if [[ -f "$public_key_file" ]]; then
-        local public_key
-        public_key=$(cat "$public_key_file")
-        
-        # Add peer section to config
-        cat >> "$config_path" << EOF
-
-# Peer: $peer_name
-[Peer]
-PublicKey = $public_key
-AllowedIPs = $peer_address
-PersistentKeepalive = $peer_keepalive
-
-EOF
-        log "Added peer $peer_name to configuration"
-    else
-        log_warning "Public key not found for peer $peer_name: $public_key_file"
-        log "Run home setup on the peer machine and copy the public key to this file"
-        
-        # Add placeholder peer section
-        cat >> "$config_path" << EOF
-
-# Peer: $peer_name (PUBLIC KEY NEEDED)
-# [Peer]
-# PublicKey = PASTE_PUBLIC_KEY_HERE
-# AllowedIPs = $peer_address
-# PersistentKeepalive = $peer_keepalive
-
-EOF
-    fi
-}
 
 setup_peer_management() {
     log "Ensuring peer directory exists..."

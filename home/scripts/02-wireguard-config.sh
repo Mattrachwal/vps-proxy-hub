@@ -6,7 +6,8 @@ set -euo pipefail
 
 # Load utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/utils.sh"
+source "$SCRIPT_DIR/../../shared/utils.sh"
+source "$SCRIPT_DIR/../../shared/wireguard_utils.sh"
 
 # Globals set during runtime
 PEER_NAME=""
@@ -40,7 +41,10 @@ main() {
     fi
 
     # Generate/load this peer's keys (home side)
-    setup_peer_keys
+    setup_home_keys "$PEER_NAME"
+    
+    # Set key paths for use in configuration generation
+    set_key_paths
 
     # Generate WireGuard configuration with proper route handling
     generate_wg_config
@@ -62,42 +66,18 @@ show_available_peers() {
     fi
 }
 
-setup_peer_keys() {
-    log "Setting up WireGuard keys for peer: $PEER_NAME"
-
-    # Paths can be overridden per-peer in config.yaml
-    local private_key_path public_key_path
-    private_key_path=$(get_peer_config "$PEER_NAME" "home_private_key_path" "/etc/wireguard/home-private.key")
-    public_key_path=$(get_peer_config "$PEER_NAME" "home_public_key_path" "/etc/wireguard/home-public.key")
-
-    # Ensure directory exists
-    mkdir -p "$(dirname "$private_key_path")"
-    mkdir -p "$(dirname "$public_key_path")"
-
-    # Generate private key if missing
-    if [[ ! -f "$private_key_path" ]]; then
-        log "Generating peer private key…"
-        generate_wg_private_key > "$private_key_path"
-        chmod 600 "$private_key_path"
-        log_success "Peer private key generated: $private_key_path"
-    else
-        log "Peer private key already exists: $private_key_path"
+# Set paths after key generation
+set_key_paths() {
+    PRIVATE_KEY_PATH=$(get_peer_config_with_defaults "$PEER_NAME" "private_key_path")
+    PUBLIC_KEY_PATH=$(get_peer_config_with_defaults "$PEER_NAME" "public_key_path")
+    
+    # Fallback to defaults if not configured
+    if [[ -z "$PRIVATE_KEY_PATH" ]]; then
+        PRIVATE_KEY_PATH="/etc/wireguard/home-private.key"
     fi
-
-    # Generate public key if missing
-    if [[ ! -f "$public_key_path" ]]; then
-        log "Generating peer public key…"
-        local private_key
-        private_key=$(cat "$private_key_path")
-        generate_wg_public_key "$private_key" > "$public_key_path"
-        chmod 644 "$public_key_path"
-        log_success "Peer public key generated: $public_key_path"
-    else
-        log "Peer public key already exists: $public_key_path"
+    if [[ -z "$PUBLIC_KEY_PATH" ]]; then
+        PUBLIC_KEY_PATH="/etc/wireguard/home-public.key"
     fi
-
-    PRIVATE_KEY_PATH="$private_key_path"
-    PUBLIC_KEY_PATH="$public_key_path"
 }
 
 # Pull the VPS public key and endpoint from config.yaml (preferred) with fallbacks.
