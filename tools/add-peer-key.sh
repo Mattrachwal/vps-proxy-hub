@@ -164,7 +164,6 @@ log "Adding peers to WireGuard configuration..."
 shopt -s nullglob
 for keyfile in "$PEERS_DIR"/*.pub; do
   [[ -f "$keyfile" ]] || continue
-  local peer_name
   peer_name="$(basename "$keyfile" .pub)"
   add_peer_to_config "$WG_CONF" "$peer_name" "$PEERS_DIR"
 done
