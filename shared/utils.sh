@@ -234,7 +234,7 @@ parse_peer_config() {
     local default="$3"
     
     awk -v peer="$peer_name" -v key="$key" -v def="$default" '
-    BEGIN { in_peer = 0; in_peers = 0 }
+    BEGIN { in_peer = 0; in_peers = 0; found = 0 }
     
     # Enter peers section
     /^peers:/ { in_peers = 1; next }
@@ -263,6 +263,7 @@ parse_peer_config() {
         gsub(/^["'"'"']|["'"'"']$/, "")
         if (length($0) > 0) {
             print
+            found = 1
             exit
         }
     }

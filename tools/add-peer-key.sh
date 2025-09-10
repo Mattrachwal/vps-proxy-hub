@@ -47,8 +47,17 @@ if ! validate_peer_name "$PEER_NAME"; then
   exit 1
 fi
 
-peer_addr="$(get_peer_config "$PEER_NAME" "address")"
-peer_keepalive="$(get_peer_config "$PEER_NAME" "keepalive" "25")"
+if command -v yq &> /dev/null; then
+  peer_addr="$(yq eval ".peers[] | select(.name == \"$PEER_NAME\") | .address" "$CONFIG_FILE")"
+  peer_keepalive="$(yq eval ".peers[] | select(.name == \"$PEER_NAME\") | .keepalive" "$CONFIG_FILE")"
+else
+  peer_addr="$(get_peer_config "$PEER_NAME" "address")"
+  peer_keepalive="$(get_peer_config "$PEER_NAME" "keepalive" "25")"
+fi
+# Default keepalive if null
+if [[ "$peer_keepalive" == "null" || -z "$peer_keepalive" ]]; then
+  peer_keepalive="25"
+fi
 
 log "Peer address: $peer_addr"
 log "Peer keepalive: $peer_keepalive"
@@ -109,8 +118,17 @@ for keyfile in "$PEERS_DIR"/*.pub; do
 
   log "Processing peer: $NAME"
 
-  ADDR="$(get_peer_config "$NAME" "address")"
-  KA="$(get_peer_config "$NAME" "keepalive" "25")"
+  if command -v yq &> /dev/null; then
+    ADDR="$(yq eval ".peers[] | select(.name == \"$NAME\") | .address" "$CONFIG_FILE")"
+    KA="$(yq eval ".peers[] | select(.name == \"$NAME\") | .keepalive" "$CONFIG_FILE")"
+  else
+    ADDR="$(get_peer_config "$NAME" "address")"
+    KA="$(get_peer_config "$NAME" "keepalive" "25")"
+  fi
+  # Default keepalive if null
+  if [[ "$KA" == "null" || -z "$KA" ]]; then
+    KA="25"
+  fi
 
   if [[ -z "$ADDR" ]]; then
     log_warning "Skipping peer $NAME: address not found in config.yaml"
