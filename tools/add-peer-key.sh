@@ -153,11 +153,15 @@ EOF
   ((PEERS_ADDED++))
   log_success "Added peer: $NAME ($ADDR)"
 done
+log "DEBUG: Finished processing all peers, PEERS_ADDED=$PEERS_ADDED"
 shopt -u nullglob
 
+log "DEBUG: About to chmod $WG_CONF"
 chmod 600 "$WG_CONF"
+log "DEBUG: chmod completed"
 log "Set permissions on $WG_CONF"
 
+log "DEBUG: Checking PEERS_ADDED count: $PEERS_ADDED"
 if (( PEERS_ADDED == 0 )); then
   log_warning "No peers added to configuration!"
 else
@@ -165,7 +169,9 @@ else
 fi
 
 # ---- Validate and restart WireGuard ----
+log "DEBUG: Starting WireGuard validation section"
 log "Testing WireGuard configuration..."
+log "DEBUG: About to run: wg-quick strip wg0"
 if wg-quick strip wg0 >/dev/null 2>&1; then
   log_success "Configuration syntax is valid"
 else
