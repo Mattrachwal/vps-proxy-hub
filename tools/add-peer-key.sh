@@ -13,6 +13,56 @@ PUBLIC_KEY=""
 # Load shared utilities
 source "$SCRIPT_DIR/../shared/utils.sh"
 
+# Add peer to configuration (same function as VPS setup)
+add_peer_to_config() {
+    local config_path="$1"
+    local peer_name="$2"
+    local peers_dir="$3"
+    
+    if [[ -z "$peer_name" ]]; then
+        return 0
+    fi
+    
+    log "Processing peer: $peer_name"
+    
+    # Get peer configuration
+    local peer_address peer_keepalive public_key_file
+    
+    if command -v yq &> /dev/null; then
+        peer_address=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .address" "$CONFIG_FILE")
+        peer_keepalive=$(yq eval ".peers[] | select(.name == \"$peer_name\") | .keepalive" "$CONFIG_FILE")
+    else
+        # Basic parsing - find peer section and extract values
+        peer_address=$(awk "/name:.*$peer_name/,/^[[:space:]]*-|^[^[:space:]]/ { if(/address:/) print \$2 }" "$CONFIG_FILE" | tr -d '"'"'" | head -1)
+        peer_keepalive=$(awk "/name:.*$peer_name/,/^[[:space:]]*-|^[^[:space:]]/ { if(/keepalive:/) print \$2 }" "$CONFIG_FILE" | head -1)
+    fi
+    
+    # Set defaults if not specified
+    peer_keepalive=${peer_keepalive:-25}
+    
+    # Look for peer public key file
+    public_key_file="$peers_dir/${peer_name}.pub"
+    
+    if [[ -f "$public_key_file" ]]; then
+        local public_key
+        public_key=$(cat "$public_key_file")
+        
+        # Add peer section to config
+        cat >> "$config_path" << EOF
+
+# Peer: $peer_name
+[Peer]
+PublicKey = $public_key
+AllowedIPs = $peer_address
+PersistentKeepalive = $peer_keepalive
+
+EOF
+        log "Added peer $peer_name to configuration"
+    else
+        log_warning "Public key not found for peer $peer_name: $public_key_file"
+    fi
+}
+
 # Parse args
 if [[ $# -ne 2 ]]; then
   echo "Usage: $0 <peer-name> <public-key>"
@@ -108,75 +158,23 @@ PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACC
 EOF
 log "Base configuration written"
 
-# ---- Append peers from $PEERS_DIR/*.pub that exist in config ----
-PEERS_ADDED=0
+# ---- Add peers from $PEERS_DIR/*.pub that exist in config ----
+log "Adding peers to WireGuard configuration..."
+
 shopt -s nullglob
-log "DEBUG: Looking for .pub files in $PEERS_DIR"
 for keyfile in "$PEERS_DIR"/*.pub; do
-  log "DEBUG: Found keyfile: $keyfile"
   [[ -f "$keyfile" ]] || continue
-  PK="$(cat "$keyfile")"
-  NAME="$(basename "$keyfile" .pub)"
-
-  log "Processing peer: $NAME"
-
-  if command -v yq &> /dev/null; then
-    ADDR="$(yq eval ".peers[] | select(.name == \"$NAME\") | .address" "$CONFIG_FILE")"
-    KA="$(yq eval ".peers[] | select(.name == \"$NAME\") | .keepalive" "$CONFIG_FILE")"
-    log "DEBUG: yq returned ADDR='$ADDR', KA='$KA'"
-  else
-    ADDR="$(get_peer_config "$NAME" "address")"
-    KA="$(get_peer_config "$NAME" "keepalive" "25")"
-    log "DEBUG: fallback returned ADDR='$ADDR', KA='$KA'"
-  fi
-  
-  # Set defaults if not specified (same as VPS setup)
-  KA=${KA:-25}
-  log "DEBUG: Final values - ADDR='$ADDR', KA='$KA'"
-  
-  if [[ -z "$ADDR" || "$ADDR" == "null" ]]; then
-    log_warning "Skipping peer $NAME: address not found in config.yaml"
-    continue
-  fi
-
-  log "DEBUG: About to write peer config - PK='$PK', NAME='$NAME'"
-  log "DEBUG: Writing to WG_CONF='$WG_CONF'"
-  
-  cat >> "$WG_CONF" <<EOF
-
-# Peer: $NAME
-[Peer]
-PublicKey           = $PK
-AllowedIPs          = $ADDR
-PersistentKeepalive = $KA
-EOF
-
-  log "DEBUG: Finished writing peer config"
-  log "DEBUG: About to increment PEERS_ADDED (currently: $PEERS_ADDED)"
-  PEERS_ADDED=$((PEERS_ADDED + 1))
-  log "DEBUG: PEERS_ADDED incremented to: $PEERS_ADDED"
-  log_success "Added peer: $NAME ($ADDR)"
-  log "DEBUG: About to continue loop or finish"
+  local peer_name
+  peer_name="$(basename "$keyfile" .pub)"
+  add_peer_to_config "$WG_CONF" "$peer_name" "$PEERS_DIR"
 done
-log "DEBUG: Finished processing all peers, PEERS_ADDED=$PEERS_ADDED"
 shopt -u nullglob
 
-log "DEBUG: About to chmod $WG_CONF"
 chmod 600 "$WG_CONF"
-log "DEBUG: chmod completed"
 log "Set permissions on $WG_CONF"
 
-log "DEBUG: Checking PEERS_ADDED count: $PEERS_ADDED"
-if (( PEERS_ADDED == 0 )); then
-  log_warning "No peers added to configuration!"
-else
-  log_success "Added $PEERS_ADDED peer(s) to configuration"
-fi
-
 # ---- Validate and restart WireGuard ----
-log "DEBUG: Starting WireGuard validation section"
 log "Testing WireGuard configuration..."
-log "DEBUG: About to run: wg-quick strip wg0"
 if wg-quick strip wg0 >/dev/null 2>&1; then
   log_success "Configuration syntax is valid"
 else
