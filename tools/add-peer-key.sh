@@ -219,31 +219,43 @@ else
 fi
 
 # Restart WireGuard service
-log "Restarting WireGuard service..."
+echo
+log_success "Configuration updated successfully. Restarting WireGuard service..."
 
 # Stop the service first to ensure clean restart
 if systemctl is-active --quiet wg-quick@wg0; then
     log "Stopping WireGuard service..."
-    systemctl stop wg-quick@wg0
+    if systemctl stop wg-quick@wg0; then
+        log_success "WireGuard service stopped"
+    else
+        log_error "Failed to stop WireGuard service"
+        exit 1
+    fi
     sleep 1
 fi
 
 # Start the service
 log "Starting WireGuard service..."
-systemctl start wg-quick@wg0
+if systemctl start wg-quick@wg0; then
+    log_success "WireGuard service started"
+else
+    log_error "Failed to start WireGuard service"
+    exit 1
+fi
 sleep 3
 
 # Verify the service is running
 if systemctl is-active --quiet wg-quick@wg0; then
-    log_success "WireGuard service is active"
+    log_success "WireGuard service is active and running"
     
     # Wait a moment for the interface to be fully ready
     sleep 2
     
     echo
-    log "Current WireGuard status:"
-    if wg show wg0; then
-        log_success "WireGuard interface is working correctly"
+    log_success "Current WireGuard status:"
+    if wg show wg0 2>/dev/null; then
+        echo
+        log_success "WireGuard interface is working correctly - peer added and service restarted!"
     else
         log_warning "wg show failed - interface may not be ready yet"
     fi
