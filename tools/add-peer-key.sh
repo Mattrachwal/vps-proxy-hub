@@ -1,7 +1,8 @@
 #!/bin/bash
-# Debug version of add-peer-key.sh with more verbose output
+# Debug version of add-peer-key.sh with more robust parsing and verbose output
 
 set -euo pipefail
+umask 077   # enforce secure permissions on new files
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE_DEFAULT="$SCRIPT_DIR/../config.yaml"
@@ -54,31 +55,50 @@ fi
 
 # Helper function to get config values
 cfg_get() {
-    local jqpath="$1" default="${2:-}"
+    local path="$1" default="${2:-}"
     if $have_yq; then
-        local val
-        val="$(yq eval "$jqpath // \"\"" "$CONFIG_FILE" 2>/dev/null || echo "")"
-        [[ -n "$val" && "$val" != "null" ]] && echo "$val" || echo "$default"
+        local out
+        out="$(yq -r "${path} // \"\"" "$CONFIG_FILE" 2>/dev/null || echo "")"
+        [[ -n "$out" ]] && printf '%s\n' "$out" || printf '%s\n' "$default"
     else
-        local key="${jqpath##*.}"
-        local line
-        line="$(grep -E "^[[:space:]]*$key:" "$CONFIG_FILE" | head -1 || true)"
-        if [[ -n "$line" ]]; then
-            echo "$line" | sed 's/.*:[[:space:]]*//' | sed 's/^"//' | sed 's/"$//' | tr -d "'" 
-        else
-            echo "$default"
-        fi
+        # fallback YAML parser (simple, expects dot-separated path)
+        awk -v path="$path" -v def="$default" '
+          BEGIN {
+            n=split(path,p,".");
+            for(i=2;i<=n;i++) want[i-1]=p[i];
+          }
+          {
+            line=$0
+            indent=match(line,/^([ ]*)/,m)? length(m[1]) : 0
+            gsub(/^[ ]+/,"",line)
+            if (line ~ /^#/ || line == "") next
+            if (match(line,/^[^:]+:/)) {
+              key=$0; sub(/:.*/,"",key); gsub(/^[ \t-]+/,"",key)
+              level=indent/2
+              ctx[level]=key
+              for(j=level+1;j<=10;j++) delete ctx[j]
+              val=line
+              sub(/^[^:]+:[ ]*/,"",val)
+              if (val != line) {
+                ok=1
+                for(k=1;k<length(want);k++) if(ctx[k]!=want[k]) ok=0
+                if(ok && key==want[length(want)]) { gsub(/^["'\'']|["'\'']$/,"",val); print val; exit }
+              }
+            }
+          }
+          END { if(NR==0) print def }
+        ' "$CONFIG_FILE" | { read v; [ -n "$v" ] && printf '%s\n' "$v" || printf '%s\n' "$default"; }
     fi
 }
 
 # Check peer configuration
 log "Checking peer configuration in config.yaml..."
 if $have_yq; then
-    peer_exists=$(yq eval ".peers[] | select(.name == \"$PEER_NAME\") | .name" "$CONFIG_FILE" 2>/dev/null || echo "")
+    peer_exists="$(yq -r --arg n "$PEER_NAME" '.peers[]? | select(.name == $n) | .name // empty' "$CONFIG_FILE" 2>/dev/null || true)"
     if [[ -n "$peer_exists" ]]; then
         log_success "Peer $PEER_NAME found in configuration"
-        peer_addr=$(yq eval ".peers[] | select(.name == \"$PEER_NAME\") | .address" "$CONFIG_FILE" 2>/dev/null || echo "")
-        peer_keepalive=$(yq eval ".peers[] | select(.name == \"$PEER_NAME\") | .keepalive" "$CONFIG_FILE" 2>/dev/null || echo "25")
+        peer_addr="$(yq -r --arg n "$PEER_NAME" '.peers[]? | select(.name == $n) | .address // empty' "$CONFIG_FILE" 2>/dev/null || true)"
+        peer_keepalive="$(yq -r --arg n "$PEER_NAME" '.peers[]? | select(.name == $n) | .keepalive // "25"' "$CONFIG_FILE" 2>/dev/null || echo "25")"
         log "Peer address: $peer_addr"
         log "Peer keepalive: $peer_keepalive"
     else
@@ -153,39 +173,19 @@ PEERS_ADDED=0
 shopt -s nullglob
 for keyfile in "$PEERS_DIR"/*.pub; do
     [[ -f "$keyfile" ]] || continue
-    
     PK="$(cat "$keyfile")"
     NAME="$(basename "$keyfile" .pub)"
-    
+
     log "Processing peer: $NAME"
-    
-    # Get peer configuration
-    ADDR=""
-    KA="25"
-    
-    if $have_yq; then
-        ADDR=$(yq eval ".peers[] | select(.name == \"$NAME\") | .address" "$CONFIG_FILE" 2>/dev/null || echo "")
-        KA=$(yq eval ".peers[] | select(.name == \"$NAME\") | .keepalive" "$CONFIG_FILE" 2>/dev/null || echo "25")
-    else
-        # Fallback parsing
-        ADDR=$(awk -v n="$NAME" '
-            $0 ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
-                inblk=0
-                if(index($0,n)>0) { inblk=1 }
-            }
-            inblk && $0 ~ /address:/ {
-                gsub(/.*: */,"",$0); gsub(/^"|"$/,"",$0); gsub(/'"'"'/,"",$0); print; exit
-            }
-        ' "$CONFIG_FILE")
-    fi
-    
-    if [[ -z "$ADDR" || "$ADDR" == "null" ]]; then
+
+    ADDR="$( $have_yq && yq -r --arg n "$NAME" '.peers[]? | select(.name == $n) | .address // empty' "$CONFIG_FILE" 2>/dev/null || echo "" )"
+    KA="$( $have_yq && yq -r --arg n "$NAME" '.peers[]? | select(.name == $n) | .keepalive // "25"' "$CONFIG_FILE" 2>/dev/null || echo "25" )"
+
+    if [[ -z "$ADDR" ]]; then
         log_warning "Skipping peer $NAME: address not found in config.yaml"
         continue
     fi
-    
-    [[ -z "$KA" || "$KA" == "null" ]] && KA="25"
-    
+
     cat >> "$WG_CONF" <<EOF
 
 # Peer: $NAME
@@ -193,7 +193,6 @@ for keyfile in "$PEERS_DIR"/*.pub; do
 PublicKey           = $PK
 AllowedIPs          = $ADDR
 PersistentKeepalive = $KA
-
 EOF
     ((PEERS_ADDED++))
     log_success "Added peer: $NAME ($ADDR)"
@@ -222,19 +221,12 @@ fi
 echo
 log_success "Configuration updated successfully. Restarting WireGuard service..."
 
-# Stop the service first to ensure clean restart
 if systemctl is-active --quiet wg-quick@wg0; then
     log "Stopping WireGuard service..."
-    if systemctl stop wg-quick@wg0; then
-        log_success "WireGuard service stopped"
-    else
-        log_error "Failed to stop WireGuard service"
-        exit 1
-    fi
+    systemctl stop wg-quick@wg0 && log_success "WireGuard service stopped"
     sleep 1
 fi
 
-# Start the service
 log "Starting WireGuard service..."
 if systemctl start wg-quick@wg0; then
     log_success "WireGuard service started"
@@ -244,21 +236,13 @@ else
 fi
 sleep 3
 
-# Verify the service is running
 if systemctl is-active --quiet wg-quick@wg0; then
     log_success "WireGuard service is active and running"
-    
-    # Wait a moment for the interface to be fully ready
     sleep 2
-    
     echo
     log_success "Current WireGuard status:"
-    if wg show wg0 2>/dev/null; then
-        echo
-        log_success "WireGuard interface is working correctly - peer added and service restarted!"
-    else
-        log_warning "wg show failed - interface may not be ready yet"
-    fi
+    wg show wg0 2>/dev/null || log_warning "wg show failed - interface may not be ready yet"
+    log_success "WireGuard interface is working correctly - peer added and service restarted!"
 else
     log_error "WireGuard failed to start. Check: journalctl -u wg-quick@wg0"
     exit 1
