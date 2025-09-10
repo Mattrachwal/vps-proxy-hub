@@ -137,6 +137,9 @@ for keyfile in "$PEERS_DIR"/*.pub; do
     continue
   fi
 
+  log "DEBUG: About to write peer config - PK='$PK', NAME='$NAME'"
+  log "DEBUG: Writing to WG_CONF='$WG_CONF'"
+  
   cat >> "$WG_CONF" <<EOF
 
 # Peer: $NAME
@@ -146,6 +149,7 @@ AllowedIPs          = $ADDR
 PersistentKeepalive = $KA
 EOF
 
+  log "DEBUG: Finished writing peer config"
   ((PEERS_ADDED++))
   log_success "Added peer: $NAME ($ADDR)"
 done
