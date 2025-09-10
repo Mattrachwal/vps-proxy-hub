@@ -121,16 +121,18 @@ for keyfile in "$PEERS_DIR"/*.pub; do
   if command -v yq &> /dev/null; then
     ADDR="$(yq eval ".peers[] | select(.name == \"$NAME\") | .address" "$CONFIG_FILE")"
     KA="$(yq eval ".peers[] | select(.name == \"$NAME\") | .keepalive" "$CONFIG_FILE")"
+    log "DEBUG: yq returned ADDR='$ADDR', KA='$KA'"
   else
     ADDR="$(get_peer_config "$NAME" "address")"
     KA="$(get_peer_config "$NAME" "keepalive" "25")"
+    log "DEBUG: fallback returned ADDR='$ADDR', KA='$KA'"
   fi
-  # Default keepalive if null
-  if [[ "$KA" == "null" || -z "$KA" ]]; then
-    KA="25"
-  fi
-
-  if [[ -z "$ADDR" ]]; then
+  
+  # Set defaults if not specified (same as VPS setup)
+  KA=${KA:-25}
+  log "DEBUG: Final values - ADDR='$ADDR', KA='$KA'"
+  
+  if [[ -z "$ADDR" || "$ADDR" == "null" ]]; then
     log_warning "Skipping peer $NAME: address not found in config.yaml"
     continue
   fi
