@@ -7,6 +7,7 @@ set -euo pipefail
 
 # Source shared utilities
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/utils.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config_utils.sh"
 
 # =============================================================================
 # WIREGUARD INSTALLATION
