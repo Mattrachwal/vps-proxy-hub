@@ -5,23 +5,13 @@ set -euo pipefail
 umask 077   # keep new files private
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE_DEFAULT="$SCRIPT_DIR/../config.yaml"
-CONFIG_FILE="${CONFIG_FILE:-$CONFIG_FILE_DEFAULT}"   # allow override: CONFIG_FILE=/path/to/config.yaml
+CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/../config.yaml}"
 
 PEER_NAME=""
 PUBLIC_KEY=""
 
-# Load shared utilities (colors + log funcs). If missing, define minimal loggers.
-if [[ -f "$SCRIPT_DIR/../shared/utils.sh" ]]; then
-  # shellcheck disable=SC1091
-  source "$SCRIPT_DIR/../shared/utils.sh"
-else
-  BLUE=""; GREEN=""; YELLOW=""; RED=""; NC=""
-  log()         { echo -e "[DEBUG] $*"; }
-  log_success() { echo -e "[SUCCESS] $*"; }
-  log_warning() { echo -e "[WARNING] $*"; }
-  log_error()   { echo -e "[ERROR] $*"; }
-fi
+# Load shared utilities
+source "$SCRIPT_DIR/../shared/utils.sh"
 
 # Parse args
 if [[ $# -ne 2 ]]; then
@@ -35,42 +25,16 @@ log "Starting debug session for peer: $PEER_NAME"
 log "Public key: $PUBLIC_KEY"
 log "Config file: $CONFIG_FILE"
 
-# Root check
-if [[ $EUID -ne 0 ]]; then
-  log_error "This script must be run as root (use sudo)."
-  exit 1
-fi
-
-# Config exists?
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  log_error "Config file not found at: $CONFIG_FILE"
-  exit 1
-fi
-log "Config file exists: $CONFIG_FILE"
-
-# yq available?
-have_yq=false
-if command -v yq >/dev/null 2>&1; then
-  have_yq=true
-  log "yq is available: $(yq --version)"
-else
-  log_error "yq v4 is required for this script (https://github.com/mikefarah/yq)."
-  exit 1
-fi
-
-# Helper to read simple scalars with default
-cfg_get() {
-  local path="$1" default="${2:-}"
-  local out
-  out="$(yq -r "${path} // \"\"" "$CONFIG_FILE" 2>/dev/null || echo "")"
-  [[ -n "$out" ]] && printf '%s\n' "$out" || printf '%s\n' "$default"
-}
+# Check prerequisites
+check_root
+check_config
+install_yq
 
 # ---- Resolve main values from config ----
-PEERS_DIR="$(cfg_get '.vps.wireguard.peers_dir' '/etc/wireguard/peers')"
-VPS_PRIVATE_KEY_PATH="$(cfg_get '.vps.wireguard.private_key_path' '/etc/wireguard/vps-private.key')"
-VPS_ADDRESS="$(cfg_get '.vps.wireguard.vps_address' '10.8.0.1/24')"
-LISTEN_PORT="$(cfg_get '.vps.wireguard.listen_port' '51820')"
+PEERS_DIR="$(get_config_value 'vps.wireguard.peers_dir' '/etc/wireguard/peers')"
+VPS_PRIVATE_KEY_PATH="$(get_config_value 'vps.wireguard.private_key_path' '/etc/wireguard/vps-private.key')"
+VPS_ADDRESS="$(get_config_value 'vps.wireguard.vps_address' '10.8.0.1/24')"
+LISTEN_PORT="$(get_config_value 'vps.wireguard.listen_port' '51820')"
 
 log "Peers directory: $PEERS_DIR"
 log "VPS private key path: $VPS_PRIVATE_KEY_PATH"
@@ -78,18 +42,13 @@ log "VPS address: $VPS_ADDRESS"
 log "Listen port: $LISTEN_PORT"
 
 # ---- Verify peer exists in config ----
-export PEER_NAME
-peer_exists="$(yq -r '.peers[]? | select(.name == strenv(PEER_NAME)) | (.name // "")' "$CONFIG_FILE" 2>/dev/null || true)"
-if [[ -z "$peer_exists" ]]; then
-  # Extra debug to show what yq sees
-  log "DEBUG: peers length: $(yq -r '.peers | length' "$CONFIG_FILE" 2>/dev/null || echo 'ERR')"
-  log "DEBUG: peer names:  $(yq -r '.peers[]? | .name' "$CONFIG_FILE" 2>/dev/null | xargs || echo 'ERR')"
+if ! validate_peer_name "$PEER_NAME"; then
   log_error "Peer $PEER_NAME not found in configuration"
   exit 1
 fi
 
-peer_addr="$(yq -r '.peers[]? | select(.name == strenv(PEER_NAME)) | (.address // "")' "$CONFIG_FILE" 2>/dev/null || true)"
-peer_keepalive="$(yq -r '.peers[]? | select(.name == strenv(PEER_NAME)) | (.keepalive // "25")' "$CONFIG_FILE" 2>/dev/null || echo "25")"
+peer_addr="$(get_peer_config "$PEER_NAME" "address")"
+peer_keepalive="$(get_peer_config "$PEER_NAME" "keepalive" "25")"
 
 log "Peer address: $peer_addr"
 log "Peer keepalive: $peer_keepalive"
@@ -150,9 +109,8 @@ for keyfile in "$PEERS_DIR"/*.pub; do
 
   log "Processing peer: $NAME"
 
-  export NAME
-  ADDR="$(yq -r '.peers[]? | select(.name == strenv(NAME)) | (.address // "")' "$CONFIG_FILE" 2>/dev/null || true)"
-  KA="$(yq -r '.peers[]? | select(.name == strenv(NAME)) | (.keepalive // "25")' "$CONFIG_FILE" 2>/dev/null || echo "25")"
+  ADDR="$(get_peer_config "$NAME" "address")"
+  KA="$(get_peer_config "$NAME" "keepalive" "25")"
 
   if [[ -z "$ADDR" ]]; then
     log_warning "Skipping peer $NAME: address not found in config.yaml"
