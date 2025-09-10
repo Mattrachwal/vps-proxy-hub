@@ -152,8 +152,11 @@ PersistentKeepalive = $KA
 EOF
 
   log "DEBUG: Finished writing peer config"
+  log "DEBUG: About to increment PEERS_ADDED (currently: $PEERS_ADDED)"
   ((PEERS_ADDED++))
+  log "DEBUG: PEERS_ADDED incremented to: $PEERS_ADDED"
   log_success "Added peer: $NAME ($ADDR)"
+  log "DEBUG: About to continue loop or finish"
 done
 log "DEBUG: Finished processing all peers, PEERS_ADDED=$PEERS_ADDED"
 shopt -u nullglob
