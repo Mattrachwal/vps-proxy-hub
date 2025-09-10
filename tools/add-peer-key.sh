@@ -111,7 +111,9 @@ log "Base configuration written"
 # ---- Append peers from $PEERS_DIR/*.pub that exist in config ----
 PEERS_ADDED=0
 shopt -s nullglob
+log "DEBUG: Looking for .pub files in $PEERS_DIR"
 for keyfile in "$PEERS_DIR"/*.pub; do
+  log "DEBUG: Found keyfile: $keyfile"
   [[ -f "$keyfile" ]] || continue
   PK="$(cat "$keyfile")"
   NAME="$(basename "$keyfile" .pub)"
